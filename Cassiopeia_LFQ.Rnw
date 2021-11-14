@@ -1,0 +1,2440 @@
+\documentclass[a4paper, 12pt]{article}
+\usepackage[a4paper,left=1.5cm,right=1.5cm,top=1cm,bottom=2cm]{geometry}
+
+\begin{document}
+
+\title{LFQ data analysis}
+\date{\today}
+\maketitle
+\vspace{1.5cm}
+\tableofcontents
+\newpage
+
+<< import default parameters, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+source("Cassiopeia_LFQ_default_parameters.R")
+
+@
+
+
+<< set your analysis parameters , echo = FALSE, message = FALSE, warning = FALSE>>=
+
+filename <- "vignette_proteinGroups.txt" 
+groups <- rep(c("ctrl+N","ctrl-N", "PD1+N","PD1-N"),each=3)
+export_matrix <- TRUE
+export_amica <- TRUE
+
+remove_contaminants <- TRUE
+razor_plus_unique_peptides_filter <- TRUE
+min_number_razor_plus_unique_peptides <- 2
+mode_valid_values_filter <- "in_at_least_one_group"
+number_valid_values_filter <- 3
+
+renormalization_median <- FALSE
+renormalization_quantile <- FALSE
+renormalization_loess <- TRUE
+renormalization_to_proteins <- NULL
+renormalization_to_sample <- NULL
+
+mode_imputation <- "normal"
+downshift <- 1.8
+width <- 0.3
+
+pairwise_comp <- list(c("ctrl-N","PD1-N"),c("ctrl+N","PD1+N"),c("PD1-N","PD1+N"))
+batch <- NULL
+proteins_of_special_interest <- c("RTCB","DDX1","C14orf166","FAM98B","PYROXD1","FAM96B")
+
+number_of_clusters <- 5
+export_clusters <- TRUE
+infer_optimal_number_of_clusters <- TRUE
+reorder_samples_for_k_means_clustering <- FALSE
+
+@
+
+
+<< load required packages, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+library(ggfortify)
+library(limma)
+library(ggplot2)
+library(fpc)
+library(RColorBrewer)
+library(dendextend)
+library(pals)
+
+@
+
+
+
+
+
+
+
+
+
+
+\section{Chosen Parameters}
+
+\vspace{0.5cm}
+
+\noindent These are the parameters used for generating this report:
+
+<< print chosen parameters >>=
+
+print(filename)
+print(groups)
+print(export_matrix)
+print(export_amica)
+print(remove_contaminants)
+print(razor_plus_unique_peptides_filter)
+print(min_number_razor_plus_unique_peptides)
+print(mode_valid_values_filter)
+print(number_valid_values_filter)
+print(renormalization_median)
+print(renormalization_quantile)
+print(renormalization_loess)
+print(renormalization_to_proteins)
+print(renormalization_to_sample)
+print(mode_imputation)
+print(downshift)
+print(width)
+print(pairwise_comp)
+print(trend_limma)
+print(batch)
+print(proteins_of_special_interest)
+print(number_of_clusters)
+print(reorder_samples_for_k_means_clustering)
+print(infer_optimal_number_of_clusters)
+print(export_clusters)
+
+@
+
+\noindent Based on the parameter called groups, it was assumed that every experimental condition had the following number of replicates:
+
+<< required calculations, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## check number of replicates
+number_of_replicates <- length(groups)/length(unique(groups))
+if ((number_of_replicates) %in% 1:5){
+  print(number_of_replicates)
+} else {
+  writeLines("warning: number of replicates per group either not uniform or > 5")
+  number_of_replicates <- 4
+}
+  
+
+## convert batch-variable to a factor  
+if(!is.null(batch)){
+  factor_batch <- factor(batch)
+} else{
+  factor_batch <- factor(rep(1, times=length(groups)))
+}
+  
+
+## check colors
+if (is.null(colors)){
+  ngroups <- length(table(groups))
+  palette <- rainbow(ngroups)
+  colors <- palette[factor(groups)]
+}
+
+
+## create custom color palette functions (for CONS as well as all proteins) barring (!) yellow
+f_CONs <- colorRampPalette(c("white","#404040"))
+f_proteins <- colorRampPalette(c("darkslateblue","blue","red","darkorchid","aquamarine","lightgreen","navy","turquoise","forestgreen","skyblue","plum","dodgerblue2","darkseagreen2", "cadetblue4", "chocolate", "bisque", "gold", "deeppink", "dodgerblue4", "indianred4", "indianred1", "lightsalmon1", "midnightblue", "mediumblue", "orange1", "mediumpurple3", "red3", "rosybrown2", "turquoise2", "wheat2", "slateblue2", "royalblue2", "purple2", "deeppink4", "firebrick", "coral", "tomato2", "#ff073a", "#06ffcb", "#00725a", "#610043", "#0024c3","#c30024", "#e94b3c", "#e94b3c", "#9becf3", "#9af3cd", "#cc9af2", "#d9a583", "#F0C013"))
+
+
+@
+
+<< read in data and curate it, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## read proteinGroups.txt file
+df <- read.delim(file=filename,sep="\t", header=TRUE,stringsAsFactors=FALSE, check.names=FALSE)
+
+
+## add column "Protein names" if missing in proteingroups.txt (extract info from FASTA-header)
+if (!"Protein names" %in% names(df) || sum(df$`Protein names` == "") > 0 ){
+  
+  protein_names <- character(nrow(df))        #initialize final vector
+  fasta_headers <- df$`Fasta headers`
+  fasta_headers_split <- strsplit(fasta_headers, split=";")
+  
+  for (i in 1:length(fasta_headers_split)){
+    fasta_headers_split_i <- fasta_headers_split[[i]]
+    protein_names_split_i <- substring(fasta_headers_split_i ,first= regexpr(fasta_headers_split_i,pattern=" ") + 1, last=regexpr(fasta_headers_split_i,pattern="OS=") -2)
+    protein_names_i <- paste0(protein_names_split_i, collapse=";")
+    protein_names[i] <- protein_names_i
+  }
+  df$`Protein names` <- protein_names
+}
+
+
+## add column "Gene names" if missing in proteingroups.txt (extract info from FASTA-header)
+if (!"Gene names" %in% names(df) || sum(df$`Gene names` == "") > 0  ){
+  gene_names <- character(nrow(df))        #initialize final vector
+  fasta_headers <- df$`Fasta headers`
+  fasta_headers <- ifelse(substring(fasta_headers, first=1, last=1)==";",
+                          no=fasta_headers, 
+                          yes=substring(fasta_headers, first=regexpr(fasta_headers,pattern="[A-Za-z0-9]"), last=10000))
+  fasta_headers_split <- strsplit(fasta_headers, split=";")
+  for (i in 1:length(fasta_headers_split)){
+    # in case protein i had a valid entry already, take the original entry
+    if ("Gene names" %in% names(df) && !df$`Gene names`[i]== ""){
+      gene_names[i] <- df$`Gene names`[i]
+      next()
+    }
+    fasta_headers_split_i <- fasta_headers_split[[i]]
+    if (length(fasta_headers_split_i) > 0 && grepl(fasta_headers_split_i,pattern="GN=")){
+      gene_names_split_i <- substring(fasta_headers_split_i ,first= regexpr(fasta_headers_split_i,pattern="GN=") + 3, last=nchar(fasta_headers_split_i))
+    } else{
+      gene_names_split_i <- substring(fasta_headers_split_i ,first = 1, last=nchar(fasta_headers_split_i))
+    }
+    gene_names_split_i
+    gene_names_split_i <- substring(gene_names_split_i, first=1, last=regexpr(gene_names_split_i, pattern=" |$")-1)
+    gene_names_split_i
+    if(length(gene_names_split_i)>1){
+      gene_names_i <- paste0(gene_names_split_i, collapse=";")
+    } else{
+      gene_names_i <- gene_names_split_i
+    }
+    gene_names[i] <- ifelse(length(gene_names_i)>0, yes=gene_names_i, no="")
+  }
+  df$`Gene names` <- gene_names
+}
+
+
+## replace NAs in column "potential contaminants" with ""
+potential_con <- df$`Potential contaminant`
+potential_con[is.na(potential_con)] <- ""
+df$`Potential contaminant` <- potential_con
+
+
+## create nice and short, non-empty names (if gene name is empty, take protein ID)
+nice_names <- ifelse(df$`Gene names`=="", yes=df$`Majority protein IDs`,no = df$`Gene names`)
+ind_split <- regexpr(nice_names, pattern=";")
+for (j in 1:length(nice_names)){
+  if(ind_split[j]==-1) {
+    next
+  }
+  temp_entry <- nice_names[j]
+  temp_entry_new <- substring(temp_entry,first=1, last=ind_split[j] -1)
+  nice_names[j] <- temp_entry_new
+}
+df$`Nice names` <- nice_names
+
+
+## attribute a unique color to each "nice name", saved as "col_all_proteins". Contaminants will be colored in different grey tones. Also add "other", assign yellow color
+col_all_proteins <- sample(f_proteins(nrow(df)))
+CON_bool <- df$`Potential contaminant` == "+"
+col_all_proteins[CON_bool] <- f_CONs(sum(CON_bool))
+names(col_all_proteins) <- df$`Nice names`
+col_all_proteins <- c(col_all_proteins, setNames("yellow",nm="other"))
+
+
+## create a copy of dataframe for matrix export later if needed
+if (export_matrix | export_amica){
+  df_initial <- df
+}
+
+@
+
+\vspace{0.5cm}
+\vspace{0.5cm}
+
+\section{Quality Control and Initial Filtering}
+
+\vspace{0.5cm}
+
+\subsection{Sample Names}
+
+\noindent These are the samples that Cassiopeia will be analyzing (extracted from intensity column names):
+
+<< extract samplenames from intensity columns, echo = FALSE, message = FALSE, warning = FALSE>>=
+  
+## find the columns that contain LFQ intensities
+bool_LFQ <- grepl(colnames(df), pattern="LFQ")
+
+
+## extract LFQ intensity columns as a seperate dataframe
+names <- names(df[,bool_LFQ, drop=FALSE])
+
+
+## define a shorter version of intensity column names denoting the sample identity
+samplenames<- sub(names, pattern="LFQ.intensity.", replace = "")
+samplenames
+
+@
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+writeLines(paste("In total:", length(samplenames), "samples"))
+
+@
+
+\noindent Make sure that this sample order corresponds to your specified groups parameter:
+
+<<>>=
+
+print(groups)
+
+@
+
+\vspace{0.5cm}
+
+\subsection{Distribution of Protein Scores}
+
+\vspace{0.5cm}
+
+\noindent The following plot shows the distribution of Protein Scores as density for both reverse and non-reverse hits:
+
+\vspace{0.5cm}
+
+<<density_reverse_nonreverse,echo = FALSE, fig.width =4.5, fig.height =4, warning = FALSE, fig.align="center">>=
+
+## plot densities of the score-variable for reverse and non-reverse hits
+ggplot(data=df) +
+  geom_density(aes(x=Score, fill=Reverse), alpha=0.4, size=0) +
+  scale_fill_manual(values=c("#E69F00","#999999")) +
+  theme_classic(base_size = 8) +
+  xlim(range(df$Score))
+
+@
+
+\subsection{Initial Filtering}
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+writeLines(paste("Before filtering, proteinGroups.txt has", dim(df)[1], "rows (protein groups)."))
+
+@
+
+\noindent The subsequent initial filtering includes filtering out reverse hits as well as protein groups that were only identified by (modification) site.
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## filter out "reverse" hits
+if ("Reverse" %in% names(df)){
+  df$`Reverse`[is.na(df$`Reverse`)] <- ""
+  reverse_bool <- df$Reverse=="+"
+  df <- df[!reverse_bool,]
+}
+
+
+## filter out "only identified by site" hits
+if ("Only identified by site" %in% names(df)){
+  df$`Only identified by site`[is.na(df$`Only identified by site`)] <- ""
+  only_site_bool<- df$`Only identified by site`=="+"
+  df <- df[!only_site_bool,]
+}
+
+@
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+writeLines(paste("After initial filtering,", dim(df)[1], "rows (protein groups) remain."))
+
+@
+
+\subsection{Checking Normalization}
+
+\vspace{0.5cm}
+
+\subsubsection{Based on Boxplots}
+
+<<prepare intensities for plotting, echo = FALSE, fig.width =7, fig.height =4, warning = FALSE>>=
+
+## extract LFQ intensity columns as a seperate dataframe
+df_LFQ <- df[,bool_LFQ, drop=FALSE]
+
+
+## replace zeros with NAs
+df_LFQ[df_LFQ==0] <- NA
+
+
+## log-transform
+df_LFQ <- log(df_LFQ,base=2)
+
+
+## replace each sample name with a shorter, more convenient version
+colnames(df_LFQ) <- samplenames
+
+
+## find the columns that contain raw intensities
+raw_bool <- grepl(colnames(df), pattern="Intensity ")
+
+
+## extract raw intensity columns as a seperate dataframe
+df_raw <- df[,raw_bool, drop=FALSE]
+
+
+## replace zeros with NAs
+df_raw[df_raw==0] <- NA
+
+
+# log2-transform
+df_raw <- log(df_raw,base=2)
+
+
+# replace each sample name with a shorter, more convenient version
+colnames(df_raw) <- samplenames
+
+@
+
+\noindent Plotting distributions of log2 raw intensities as well as log2 LFQ intensities for each sample:
+
+<<raw_intensities_boxplots, echo = FALSE, fig.width =10, fig.height =5.5, warning = FALSE, fig.align="center">>=
+
+## plot raw intensities
+par(mar=c(8,4,4,2))
+boxplot(df_raw,las=2,main="Raw Intensities",border=colors,xaxt="n",yaxt="n",ylab="log2 Raw Intensity", lwd=1.5)
+axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+axis(side=2, at= 1:10*5)
+
+@
+
+<<LFQ_intensities_boxplots, echo = FALSE, fig.width =10, fig.height =5.5, warning = TRUE, fig.align="center">>=
+
+## plot LFQ intensities
+par(mar=c(8,4,4,2))
+boxplot(df_LFQ,las=2,main="LFQ Intensities",border=colors,xaxt="n",yaxt="n",ylab="log2 LFQ Intensity", lwd=1.5)
+axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+axis(side=2, at= 1:10*5)
+
+@
+
+\vspace{0.5cm}
+
+\subsubsection{Based on Scatterplots}
+
+\noindent If there are more than 5 samples, the following plot will randomly select 5 samples and plot their LFQ intensities as pairwise scatterplots:
+
+<<scatterplot_check_normalization, echo = FALSE, fig.width =9, fig.height =6, warning = TRUE, fig.align="center">>=
+
+## define helper function for pairs-plot:
+my_line <- function(x,y,...){
+    points(x,y,pch=16, col=colors_scatter[prot_con][order(prot_con)], xlim=range(as.matrix(df_LFQ),na.rm=TRUE),ylim=range(as.matrix(df_LFQ),na.rm=TRUE))
+    abline(a = 0,b = 1, col="black", lty="dashed")
+}
+
+
+## paiwise scatterplots of LFQ intensities from different samples
+if(ncol(df_LFQ)< 2){
+  print("not enough samples to create a scatterplot")
+} else{
+  if (ncol(df_LFQ) == 2){
+    CON_bool <- df$`Potential contaminant`=="+"
+    names(df_LFQ)
+    plot(df_LFQ[,1], df_LFQ[,2], main="", yaxt="n",xaxt="n",yaxt="n", pch=16, col="grey", ylab="", xlab="", cex=1.2)
+    points(df_LFQ[CON_bool,1], df_LFQ[CON_bool,2],pch=16, col="#E69F00", cex=1.2)
+    abline(a=0,b=1, col="black", lty="dashed")
+    axis(side=1, cex.axis=0.8)
+    axis(side=2, cex.axis=0.8)
+    title(xlab=names(df_LFQ)[1], ylab=names(df_LFQ)[2], cex.lab=0.85)
+    legend("bottomright", bty="n", legend=c("non-CON", "CON"), col=c("grey", "#E69F00"),pch=16, inset=c(0.02,0.02))
+    
+  } else{
+    if (ncol(df_LFQ) >= 3 &  ncol(df_LFQ) <= 5){
+      colors_scatter <- c("#E69F00","grey")
+      names(colors_scatter) <- c("+","-")
+      prot_con <- df$`Potential contaminant`
+      prot_con <- ifelse(prot_con=="+",yes=prot_con, no="-")
+      pairs(df_LFQ[rev(order(prot_con)),], panel=my_line, cex.labels=0.9 ,oma=c(3,3,3,12))
+      par(xpd=TRUE)
+      legend("right", bty="n", legend=c("non-CON", "CON"), col=c("grey", "#E69F00"),pch=16,cex=0.8)
+      
+    } else {
+      colors_scatter <- c("#E69F00","grey")
+      names(colors_scatter) <- c("+","-")
+      prot_con <- df$`Potential contaminant`
+      prot_con <- ifelse(prot_con=="+",yes=prot_con, no="-")
+      five_random_indices <- sample(1:length(names), size=5)
+      five_random_indices
+      df_LFQ_five <- df_LFQ[,five_random_indices]
+      pairs(df_LFQ_five[order(prot_con),], panel=my_line, oma=c(3,3,3,12), cex.labels=0.9)
+      par(xpd=TRUE)
+      legend("right", bty="n", legend=c("non-CON", "CON"), col=c("grey", "#E69F00"),pch=16, cex=0.8)
+    }
+  }
+}
+
+
+
+@
+
+\vspace{0.5cm}
+
+\subsection{Contamination and Top Proteins}
+
+\vspace{0.5cm}
+
+\noindent Plotting relative amount of contaminants per sample by iBAQ intensities:
+
+<<CON_relative_amount, echo = FALSE, fig.width =7, fig.height =4, warning = FALSE>>=
+
+## find rows containing contaminants
+CON_bool <- df$`Potential contaminant`=="+"
+
+
+## find the columns that contain iBAQ intensities and extract them (and not iBAQ peptides!)
+iBAQ_bool <- grepl(colnames(df), pattern="iBAQ.") & !grepl(colnames(df), pattern="iBAQ peptides")
+df_iBAQ <- df[,iBAQ_bool, drop=FALSE]
+df_iBAQ[df_iBAQ==0] <- NA
+
+
+## plot results
+df_iBAQ_CON <- df_iBAQ[CON_bool,,drop=FALSE]
+summed_iBAQ_CON <- colSums(df_iBAQ_CON,na.rm=TRUE)
+summed_iBAQ <- colSums(df_iBAQ, na.rm=TRUE)
+CON_ratios <- summed_iBAQ_CON/summed_iBAQ
+par(mar=c(8,4,4,2))
+barplot(CON_ratios,las=2,main="Relative Amount of Contaminants \n based on iBAQ Intensities",border=colors,ylim=c(0,1), names.arg=samplenames, cex.names=0.7, cex.main=0.8, yaxt="n")
+axis(side=2, cex.axis=0.7, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+
+
+@
+
+\vspace{0.5cm}
+
+\noindent Listing the top protein groups (rows) of the whole experiment based on total iBAQ Intensities over all samples, including contaminants:
+
+<< list top proteins in terms of overall iBAQ Intensities, echo = FALSE, message = FALSE, warning = FALSE,fig.width =4, fig.height =3>>=
+
+## calculate iBAQ percentages
+summed_iBAQ <- rowSums(df_iBAQ,na.rm=TRUE)
+df_temp <- cbind(df, summed_iBAQ)
+df_temp$Percentage <- round(summed_iBAQ/sum(summed_iBAQ,na.rm=TRUE), digits=3)*100
+
+
+## reorder rows of new dataframe according to total iBAQ (decreasing). Extract top iBAQ proteins
+ind_order <- order(summed_iBAQ, decreasing = TRUE)
+df_temp <- df_temp[ind_order,]
+df_temp$Name<- df_temp$`Nice names`
+df_topProteins <- head(df_temp[,c("summed_iBAQ","Percentage","Name")], n=list_number)
+df_topProteins
+
+  
+@
+
+\vspace{0.5cm}
+
+\noindent Taking a closer look at the following samples (per default: all samples):
+
+<<echo = FALSE, message = FALSE, warning = FALSE, fig.width =4, fig.height =1.75, >>=
+
+if(closer_look_sample_number=="all"){
+  ind_closer_look <- (1:length(samplenames))[order(groups)]
+} else{
+  ind_closer_look <- closer_look_sample_number
+}
+cat("\n")
+print(samplenames[ind_closer_look])
+
+
+@
+
+\vspace{0.5cm}
+
+\noindent The following barplots show relative iBAQ intensities for each sample seperately.  In each plot, the top x protein groups per sample including contaminants  are highlighted. Per default, the top 10 protein groups + all other protein groups (aggregated to a single category "other", displayed in yellow) are shown, arranged in decreasing order from bottom to top - with the exception of "other" proteins, which are always put at the very bottom. 
+
+\vspace{0.5cm} 
+\vspace{0.5cm}
+
+<<top_iBAQ_proteins, echo = FALSE, message = FALSE, warning = FALSE, fig.width =10, fig.height =2, >>=
+
+## set plot specifics
+if (closer_look_sample_number == "all"){
+  par(mfrow=c(1,number_of_replicates))
+} else{
+  par(mfrow=c(1,1))
+}
+par(mar=c(1,2.5,2,1))
+
+
+## go over each sample and plot top proteins
+for (i in ind_closer_look){
+
+  # calculate iBAQ fraction for each protein
+  df_iBAQ_i <- df_iBAQ[,i]
+  fraction_iBAQ_i<- df_iBAQ_i/(sum(df_iBAQ_i,na.rm=TRUE))
+  
+  # reorder, and assign and replace non-top proteins with "other"
+  iBAQ_order_i <- order(fraction_iBAQ_i, decreasing=TRUE)
+  plot_fraction_iBAQ <- fraction_iBAQ_i[iBAQ_order_i]
+  plotNames <- df$`Nice names`[iBAQ_order_i]
+  plotNames[(plot_number+1):nrow(df)] <- "other"
+  
+  # calculate plot values, and convert into matrix
+  plot_values <- tapply(plot_fraction_iBAQ, INDEX=plotNames, FUN=sum, na.rm=TRUE)
+  plot_rownames <- names(plot_values)
+  plot_values <- matrix(plot_values,ncol=1)
+  rownames(plot_values) <- plot_rownames
+  
+  # set "other" proteins to the bottom per default
+  bool <- rownames(plot_values)=="other"
+  plot_values <- rbind(plot_values[bool,,drop=FALSE],plot_values[!bool,,drop=FALSE])
+  
+  # set title and plot
+  title <- paste("sample", samplenames[i])
+  
+  # generate list for legend
+  if(number_of_replicates == 5){
+    bty <- "n"
+    cex <- 0.5
+    x <- "right"
+    argslegend <- list(bty=bty,cex=cex,x=x, inset=c(-0.1,0))
+  } else {
+     if (number_of_replicates == 1){
+       bty <- "n"
+       cex <- 0.65
+       x <- "right"
+       argslegend <- list(bty=bty,cex=cex,x=x, inset=c(0.3,0))
+     } else {
+        if (number_of_replicates == 2 | number_of_replicates == 3){
+          bty <- "n"
+          cex <- 0.65
+          x <- "right"
+          argslegend <- list(bty=bty,cex=cex,x=x, inset=c(0.12,0)) 
+        } else{
+          bty <- "n"
+          cex <- 0.6
+          x <- "right"
+          argslegend <- list(bty=bty,cex=cex,x=x, inset=c(0,0)) 
+        }
+     }
+  }
+  
+  # plot top proteins
+  barplot(plot_values, main=title, col=col_all_proteins[rownames(plot_values)], xlim = c(0, 4), legend.text=rownames(plot_values),args.legend=argslegend,cex.main=0.8, cex.axis=1)
+  
+}
+
+@
+
+\vspace{0.5cm}
+
+\noindent The following barplots show the relative amount of the top x contaminants based on all Contaminants (therefore always scaling up to 1!), for each sample seperately.
+
+\vspace{0.5cm}
+
+<<top_contaminants, echo = FALSE, message = FALSE, warning = FALSE, fig.width =10, fig.height =2>>=
+
+# List top contaminants for each sample
+CON_bool <- df$`Potential contaminant` == "+"
+
+
+## set plot specifics
+if (closer_look_sample_number == "all"){
+  par(mfrow=c(1,number_of_replicates))
+} else{
+  par(mfrow=c(1,1))
+}
+par(mar=c(1,2.5,2,1))
+
+
+## ## go over each sample and plot top contaminants proteins if there are contaminants
+if( any(CON_bool) ){
+  
+  for (i in ind_closer_look){
+  
+    # calculate iBAQ fraction for each protein
+    df_iBAQ_i <- df_iBAQ[CON_bool,i]
+    fraction_iBAQ_i<- df_iBAQ_i/(sum(df_iBAQ_i,na.rm=TRUE))
+    
+    # reorder, and assign and replace non-top proteins with "other"
+    iBAQ_order_i <- order(fraction_iBAQ_i, decreasing=TRUE)
+    plot_fraction_iBAQ <- fraction_iBAQ_i[iBAQ_order_i]
+    plotNames <- df[CON_bool,]$`Nice names`[iBAQ_order_i]
+    plotNames[(plot_number+1):length(df_iBAQ_i)] <- "other"
+    
+    # calculate plot values, and convert into matrix
+    plot_values <- tapply(plot_fraction_iBAQ, INDEX=plotNames, FUN=sum, na.rm=TRUE)
+    plot_rownames <- names(plot_values)
+    plot_values <- matrix(plot_values,ncol=1)
+    rownames(plot_values) <- plot_rownames
+    
+    # set "other" proteins to the bottom per default
+    bool <- rownames(plot_values)=="other"
+    plot_values <- rbind(plot_values[bool,,drop=FALSE],plot_values[!bool,,drop=FALSE])
+    
+    # set title and plot
+    title <- paste("sample", samplenames[i])
+  
+    # generate list for legend
+    if(number_of_replicates == 5){
+      bty <- "n"
+      cex <- 0.5
+      x <- "right"
+      argslegend <- list(bty=bty,cex=cex,x=x, inset=c(-0.1,0))
+    } else {
+      if (number_of_replicates == 1){
+      bty <- "n"
+       cex <- 0.65
+       x <- "right"
+       argslegend <- list(bty=bty,cex=cex,x=x, inset=c(0.3,0))
+     } else {
+        if (number_of_replicates == 2 | number_of_replicates == 3){
+          bty <- "n"
+          cex <- 0.65
+          x <- "right"
+          argslegend <- list(bty=bty,cex=cex,x=x, inset=c(0.12,0)) 
+        } else{
+          bty <- "n"
+          cex <- 0.6
+          x <- "right"
+          argslegend <- list(bty=bty,cex=cex,x=x, inset=c(0,0)) 
+        }
+     }
+  }
+  
+  # plot top proteins
+  barplot(plot_values, main=title, col=col_all_proteins[rownames(plot_values)], xlim = c(0, 4), legend.text=rownames(plot_values),args.legend=argslegend,cex.main=0.8, cex.axis=1)
+    
+  }
+}  
+  
+
+@
+
+\vspace{0.5cm}
+\vspace{0.5cm}
+
+
+
+
+
+
+
+
+
+
+\section{Advanced Filtering}
+
+\vspace{0.5cm}
+
+\subsection{Based on Contaminants}
+
+\noindent This filtering step filters out rows (protein groups) considered as contaminants, as long as the respective parameter is set on TRUE (default setting). The current parameter chosen is:
+
+<< contaminants filter settings >>=
+
+print(remove_contaminants)
+
+@
+
+<<remove contaminants, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+writeLines(paste("Before this filtering step, there are ", dim(df)[1], "rows (protein groups)."))
+if (remove_contaminants == TRUE & "Potential contaminant" %in% names(df)){
+  CON_bool <- df$`Potential contaminant`=="+"
+  df <- df[!CON_bool,]
+}
+writeLines(paste("After this filtering step,", dim(df)[1], "rows (protein groups) remain."))
+
+@
+
+\subsection{Based on Razor + Unique Peptides}
+
+<< razor + unique filter settings >>=
+
+print(razor_plus_unique_peptides_filter)
+print(min_number_razor_plus_unique_peptides)
+
+@
+
+<<filter based on razor + unique peptides, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+if (razor_plus_unique_peptides_filter & "Razor + unique peptides" %in% names(df)) {
+  writeLines(paste("Before this filtering step, there are ", dim(df)[1], "rows (protein groups)."))
+  writeLines(paste("Removing rows (protein groups) with less than", min_number_razor_plus_unique_peptides, "razor + unique peptides."))
+  df <- df[df$`Razor + unique peptides` >= min_number_razor_plus_unique_peptides,]
+  writeLines(paste("After this filtering step,", dim(df)[1], "rows (protein groups) remain."))
+}
+
+@
+
+\subsection{Based on Valid Values}
+
+\noindent This final filtering step filters out rows (protein groups) based on minimum number of valid values in the LFQ intensity columns (in case a renormalization stragegy is employed, this filtering step is instead based on the minimum number of valid values in the raw intensity columns). The mode and the minimum number of valid values can be changed via their corresponding parameters. The parameters currently chosen are:
+
+<< valid value filter settings >>=
+
+print(mode_valid_values_filter)
+print(number_valid_values_filter)
+
+@
+
+<< filter based on valid values, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## number of protein groups before filtering
+writeLines(paste("Before this filtering step, there are ", dim(df)[1], "rows (protein groups)."))
+
+
+## get unique groups and its length
+unique_groups <- unique(groups)
+n_unique_groups <- length(unique_groups)
+
+
+## create dataframe where each valid value is represented by a TRUE. In case a renormalization strategy is employed, the NA-information will be extracted from the raw intensities 
+if( renormalization_median | renormalization_quantile | renormalization_loess | !is.null(renormalization_to_proteins) | !is.null(renormalization_to_sample) ){
+  df_validvalues <- df[,raw_bool,drop=FALSE]
+  df_validvalues[df_validvalues==0] <- NA
+  df_validvalues <- !is.na(df_validvalues)
+} else{
+  df_validvalues <- df[,bool_LFQ,drop=FALSE]
+  df_validvalues[df_validvalues== 0] <- NA  
+  df_validvalues <- !is.na(df_validvalues)
+}
+  
+###############################################################################
+## filter when mode is "in_at_least_one_group"
+
+if (mode_valid_values_filter == "in_at_least_one_group"){
+  
+  # initiate helper matrix (one column for each group)
+  bool_matrix <- matrix(rep(TRUE,times=nrow(df)*n_unique_groups), ncol=n_unique_groups)
+  colnames(bool_matrix) <- unique_groups
+  
+  # create logical vector indicating which rows to keep; then filter
+  for (i in unique_groups){
+    df_i <- df_validvalues[,groups==i,drop=FALSE]
+    rowsum_i <- apply(df_i,MARGIN = 1, FUN=sum)
+    rowsum_i_bool <- rowsum_i >= number_valid_values_filter
+    bool_matrix[,i] <- rowsum_i_bool
+  }  
+  bool_keep <- apply(bool_matrix, MARGIN = 1, FUN=any)
+  df$`Valid Values Filter (removed)` <- ifelse(test=bool_keep, yes="", no="+")
+  df <- df[bool_keep,]
+}
+
+
+###############################################################################
+# filter when mode is "in_each_group"
+
+if (mode_valid_values_filter == "in_each_group"){
+  
+  # initiate helper matrix (one column for each group)
+  bool_matrix <- matrix(rep(TRUE,times=nrow(df)*n_unique_groups), ncol=n_unique_groups)
+  colnames(bool_matrix) <- unique_groups
+  
+  # create logical vector indicating which rows to keep; then filter
+  for (i in unique_groups){
+    df_i <- df_validvalues[,groups==i, drop=FALSE]
+    rowsum_i <- apply(df_i,MARGIN = 1, FUN=sum)
+    rowsum_i_bool <- rowsum_i >= number_valid_values_filter
+    bool_matrix[,i] <- rowsum_i_bool
+  }  
+  bool_keep <- apply(bool_matrix, MARGIN = 1, FUN=all)
+  df$`Valid Values Filter (removed)` <- ifelse(test=bool_keep, yes="", no="+")
+  df <- df[bool_keep,]
+}
+
+
+###########################################################################
+# filter when mode is "in_total"
+
+if (mode_valid_values_filter == "in_total"){
+  
+  # calculate logical vector indicating which rows to keep; then filter
+  rowsum_valid_values <- apply(df_validvalues, MARGIN=1, FUN=sum)
+  rowsum_bool <- rowsum_valid_values >= number_valid_values_filter
+  bool_keep <- rowsum_bool
+  df$`Valid Values Filter (removed)` <- ifelse(test=bool_keep, yes="", no="+")
+  df <- df[bool_keep,]
+}
+
+
+## number of protein groups after filtering
+writeLines(paste("After this filtering step,", dim(df)[1], "rows (protein groups) remain."))
+
+@
+
+\noindent The rest of this report will focus exclusively on the proteins (rows) that are left after this final filtering step, i.e. every protein that has been discarded by now will not be included in the subsequent analysis.
+
+<<log transform LFQ intensities, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## extract feature data as a seperate data frame
+df_feature <- df[,!bool_LFQ, drop=FALSE]
+
+
+## extract LFQ intensity columns as a seperate dataframe
+df_LFQ <- df[,bool_LFQ, drop=FALSE]
+
+
+## replace zeros with NAs
+df_LFQ[df_LFQ==0] <- NA
+
+
+## log transform
+df_LFQ <- log(df_LFQ,base=2)
+
+
+# stitch together 
+df <- cbind(df_LFQ, df_feature)
+
+@
+
+\vspace{0.5cm}
+
+\subsection{Renormalization after Advanced Filtering}
+
+\noindent All the available renormalization methods use the raw intensities only. Choosing one will replace the MaxQuant LFQ intensities with normalized raw intensities (i.e. new LFQ intensities are created and used for the remainder of the analysis).
+
+<< renormalization settings >>=
+
+print(renormalization_median)
+print(renormalization_quantile)
+print(renormalization_loess)
+print(renormalization_to_proteins)
+print(renormalization_to_sample)
+
+@
+
+<<renormalization_LFQ_boxplots, echo = FALSE, fig.width =10, fig.height =5.5, warning = TRUE>>=
+
+## note: renormalization will be done on the raw intensities, not the LFQ intensities!
+
+
+## define bool_LFQ (to extract everything else but LFQ intensities)
+bool_LFQ <-  grepl(colnames(df), pattern="LFQ")
+
+
+###############################################################################
+if (renormalization_median){
+  
+  writeLines("Normalizing raw intensities by performing median normalization: ")
+
+  # extract feature data as a seperate data frame
+  df_feature <- df[,!bool_LFQ, drop=FALSE]
+
+  # extract raw intensity columns as a seperate dataframe
+  raw_bool <- grepl(colnames(df), pattern="Intensity ")
+  df_raw <- df[,raw_bool, drop=FALSE]
+  
+  # replace zeros with NAs
+  df_raw[df_raw==0] <- NA
+
+  # log2 transform
+  df_raw <- log(df_raw,base=2)
+  
+  # convert to matrix for subsequent normalization step
+  m_raw <- as.matrix(df_raw)
+  
+  # calculate sample medians; and median of medians; and normalization scalar
+  sample_medians <- apply(m_raw, MARGIN=2, FUN=median, na.rm=TRUE)
+  sample_medians
+  medians_of_sample_medians <- median(sample_medians, na.rm=TRUE)
+  normalization_scalar <- sample_medians - medians_of_sample_medians
+  
+  # perform median normalization with function contained in package limma
+  m_raw_mediannorm <- sweep(m_raw, STATS=normalization_scalar, FUN="-", MARGIN = 2)
+
+  # stitch together dataframe
+  df_norm <- as.data.frame(m_raw_mediannorm)
+  colnames(df_norm) <- paste0("norm intensity ",samplenames)
+  df <- cbind(df_norm, df_feature)
+  
+  # plot renormalized intensities
+  par(mar=c(8,4,4,2))
+  boxplot(df_norm,las=2,main="Renormalized Intensities",border=colors,xaxt="n",yaxt="n",ylab="log2 norm Intensity", lwd=1.5)
+  axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+  axis(side=2, at= 1:10*5)
+}
+
+
+################################################################################
+if (renormalization_quantile){
+  
+  writeLines("Normalizing raw intensities by performing quantile normalization: ")
+
+  # extract feature data as a seperate data frame
+  df_feature <- df[,!bool_LFQ, drop=FALSE]
+
+  # extract raw intensity columns as a seperate dataframe
+  raw_bool <- grepl(colnames(df), pattern="Intensity ")
+  df_raw <- df[,raw_bool, drop=FALSE]
+  
+  # replace zeros with NAs
+  df_raw[df_raw==0] <- NA
+
+  # log2-transform
+  df_raw <- log(df_raw,base=2)
+  
+  # convert to matrix for subsequent normalization step
+  m_raw <- as.matrix(df_raw)
+  
+  # perform quantile normalization with function contained in package limma
+  m_raw_quantilenorm <- normalizeBetweenArrays(m_raw, method="quantile")
+
+  # stitch together dataframe
+  df_norm <- as.data.frame(m_raw_quantilenorm)
+  colnames(df_norm) <- paste0("norm intensity ",samplenames)
+  df <- cbind(df_norm, df_feature)
+  
+  # plot renormalized intensities
+  par(mar=c(8,4,4,2))
+  boxplot(df_norm,las=2,main="Renormalized Intensities",border=colors,xaxt="n",yaxt="n",ylab="log2 norm Intensity", lwd=1.5)
+  axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+  axis(side=2, at= 1:10*5)
+}
+
+
+################################################################################
+if (renormalization_loess){
+  
+  writeLines("Normalizing raw intensities by performing cyclic-loess normalization: ")
+
+  # extract feature data as a seperate data frame
+  df_feature <- df[,!bool_LFQ, drop=FALSE]
+
+  # extract raw intensity columns as a seperate dataframe
+  raw_bool <- grepl(colnames(df), pattern="Intensity ")
+  df_raw <- df[,raw_bool, drop=FALSE]
+  
+  # replace zeros with NAs
+  df_raw[df_raw==0] <- NA
+
+  # log2-transform
+  df_raw <- log(df_raw,base=2)
+  
+  # convert to matrix for subsequent normalization step
+  m_raw <- as.matrix(df_raw)
+  
+  # perform quantile normalization with function contained in package limma
+  m_raw_loessnorm <- normalizeBetweenArrays(m_raw, method="cyclicloess", cyclic.method = "fast")
+
+  # stitch together dataframe
+  df_norm <- as.data.frame(m_raw_loessnorm)
+  colnames(df_norm) <- paste0("norm intensity ",samplenames)
+  df <- cbind(df_norm, df_feature)
+  
+  # plot renormalized intensities
+  par(mar=c(8,4,4,2))
+  boxplot(df_norm,las=2,main="Renormalized Intensities",border=colors,xaxt="n",yaxt="n",ylab="log2 norm Intensity", lwd=1.5)
+  axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+  axis(side=2, at= 1:10*5)
+}
+
+
+################################################################################
+if (!is.null(renormalization_to_proteins)){
+
+  writeLines("Normalizing raw intensities by normalizing to proteins as specified: ")
+  cat("\n")
+  print(renormalization_to_proteins)
+
+  # extract feature data as a seperate data frame
+  df_feature <- df[,!bool_LFQ, drop=FALSE]
+
+  # extract raw intensity columns as a seperate dataframe
+  raw_bool <- grepl(colnames(df), pattern="Intensity ")
+  df_raw <- df[,raw_bool, drop=FALSE]
+  
+  # replace zeros with NAs
+  df_raw[df_raw==0] <- NA
+
+  # log2-transform
+  df_raw <- log(df_raw,base=2)
+
+  # convert to matrix for subsequent normalization step
+  m_raw <- as.matrix(df_raw)
+  
+  # extract sub_matrix for normalization 
+  m_raw_norm_samples <- m_raw[df$`Gene names` %in% renormalization_to_proteins,, drop=FALSE]
+  
+  # check for rows with intensities > 0:
+  bool_non_zero_rows <- rowSums(m_raw_norm_samples, na.rm=TRUE) > 0
+  
+  # document how many rows are non-zero
+  cat("\n")
+  writeLines(paste0(sum(bool_non_zero_rows)," out of ", length(renormalization_to_proteins) ," protein groups are used for this renormalization"))
+  
+  # taking subset of m_raw containing only proteins that are non-NA in samples 
+  m_raw_nonNA_proteins <- m_raw_norm_samples[bool_non_zero_rows,,drop=FALSE]
+  
+  # calculate medians of all samples for these proteins
+  median_non_NA_proteins <- apply(m_raw_nonNA_proteins, MARGIN = 2, FUN=median, na.rm=TRUE)
+  
+  # calculate median of all medians to use as reference:
+  median_reference <- median(median_non_NA_proteins)
+  
+  # calculate differences between sample medians (of non_NA_proteins in the ref samples)
+  delta_medians <- median_reference - median_non_NA_proteins
+  
+  # add delta_medians to all respective raw intensity columns(by simple addition)
+  m_raw_samplerenorm <- sweep(m_raw, FUN="+", MARGIN = 2, STATS = delta_medians)
+  
+  # stitch together dataframe
+  df_norm <- as.data.frame(m_raw_samplerenorm)
+  colnames(df_norm) <- paste0("norm intensity ",samplenames)
+  df <- cbind(df_norm, df_feature)
+  
+  # plot renormalized intensities:
+  par(mar=c(8,4,4,2))
+  boxplot(df_norm,las=2,main="Renormalized Intensities (all proteins)",border=colors,xaxt="n",yaxt="n",ylab="log2 norm Intensity", lwd=1.5,ylim=range(df_norm, na.rm=TRUE))
+  axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+  axis(side=2, at= 1:10*5)
+}
+
+
+################################################################################
+if (!is.null(renormalization_to_sample)){
+  
+  writeLines("Normalizing raw intensities by normalizing to sample(s): ")
+  cat("\n")
+  print(names[renormalization_to_sample])
+
+  # extract feature data as a seperate data frame
+  df_feature <- df[,!bool_LFQ, drop=FALSE]
+
+  # extract raw intensity columns as a seperate dataframe
+  raw_bool <- grepl(colnames(df), pattern="Intensity ")
+  df_raw <- df[,raw_bool, drop=FALSE]
+  
+  # replace zeros with NAs
+  df_raw[df_raw==0] <- NA
+
+  # log2-transform
+  df_raw <- log(df_raw,base=2)
+
+  # convert to matrix for subsequent normalization step
+  m_raw <- as.matrix(df_raw)
+  
+  # extract sub matrix for normalization 
+  m_raw_norm_samples <- m_raw[,renormalization_to_sample, drop=FALSE]
+  
+  # check for rows with intensities >0:
+  bool_non_zero_rows <- rowSums(m_raw_norm_samples, na.rm=TRUE) > 0
+  
+  # document how many rows are non-zero
+  cat("\n")
+  writeLines(paste0(sum(bool_non_zero_rows), " protein groups out of ", length(bool_non_zero_rows), " are used for this renormalization"))
+  
+  # taking subset of m_raw containing only proteins that are non-NA in samples 
+  m_raw_nonNA_proteins <- m_raw[bool_non_zero_rows,,drop=FALSE]
+  
+  # calculate medians of all samples for these proteins
+  median_non_NA_proteins <- apply(m_raw_nonNA_proteins, MARGIN = 2, FUN=median, na.rm=TRUE)
+  
+  # calculate median of norm_to_samples:
+  median_reference <- median(median_non_NA_proteins[renormalization_to_sample])
+  
+  # calculate differences between sample medians (of non_NA_proteins in the ref samples)
+  delta_medians <- median_reference - median_non_NA_proteins
+  
+  # add delta_medians to all respective raw_columns (by simple addition)
+  m_raw_samplerenorm <- m_raw
+  for (k in 1:ncol(m_raw_samplerenorm)){
+    m_raw_samplerenorm[,k] <- m_raw_samplerenorm[,k] + delta_medians[k]
+  }
+  
+  # stitch together dataframe
+  df_norm <- as.data.frame(m_raw_samplerenorm)
+  colnames(df_norm) <- paste0("norm intensity ",samplenames)
+  df <- cbind(df_norm, df_feature)
+  
+  # plot renormalized intensities
+  par(mar=c(8,4,4,2))
+  boxplot(df_norm,las=2,main="Renormalized Intensities",border=colors,xaxt="n",yaxt="n",ylab="log2 norm Intensity", lwd=1.5)
+  axis(side=1, at= 1:length(samplenames),las=2, labels=samplenames, cex.axis = 0.75)
+  axis(side=2, at= 1:10*5)
+}
+
+
+## if no renormalization was done, rename LFQ intensities to norm Intensities
+if( !(renormalization_median | renormalization_quantile | renormalization_loess | !is.null(renormalization_to_sample) | !is.null(renormalization_to_proteins)) ){
+  names(df)[bool_LFQ] <- paste0("norm intensity ",samplenames)
+}
+
+@
+
+\vspace{0.5cm}
+\vspace{0.5cm}
+
+<<renormalization_scatterplots, echo = FALSE, fig.width =9, fig.height =6, warning = TRUE, fig.align="center">>=
+
+## paiwise scatterplot of renormalized intensities if renormalization (barring renormalization to proteins) was conducted
+if( renormalization_median | renormalization_quantile | renormalization_loess | !is.null(renormalization_to_sample) ){
+  writeLines("Scatterplot of renormalized proteins:")
+
+  if(ncol(df_norm)< 2){
+    writeLines("not enough samples to create a scatterplot")
+    
+  } else{
+    if (ncol(df_norm) == 2){
+      CON_bool <- df$`Potential contaminant`=="+"
+      names(df_norm)
+      plot(df_norm[,1], df_norm[,2], main="", yaxt="n",xaxt="n",yaxt="n", pch=16, col="grey", ylab="", xlab="", cex=1.2)
+      points(df_norm[CON_bool,1], df_norm[CON_bool,2],pch=16, col="#E69F00", cex=1.2)
+      abline(a=0,b=1, col="black", lty="dashed")
+      axis(side=1, cex.axis=0.8)
+      axis(side=2, cex.axis=0.8)
+      title(xlab=names(df_norm)[1], ylab=names(df_norm)[2], cex.lab=0.85)
+      legend("bottomright", bty="n", legend=c("non-CON", "CON"), col=c("grey", "#E69F00"),pch=16, inset=c(0.02,0.02))
+      
+    } else{
+      if (ncol(df_norm) >= 3 &  ncol(df_norm) <= 5){
+        colors_scatter <- c("#E69F00","grey")
+        names(colors_scatter) <- c("+","-")
+        prot_con <- df$`Potential contaminant`
+        prot_con <- ifelse(prot_con=="+",yes=prot_con, no="-")
+        pairs(df_norm[rev(order(prot_con)),], panel=my_line, cex.labels=0.9, oma=c(3,3,3,12))
+        par(xpd=TRUE)
+        legend("right", bty="n", legend=c("non-CON", "CON"), col=c("grey", "#E69F00"),pch=16,cex=0.8)
+   
+      } else {
+        # randomly select 5 columns and to scatterplot as a 5*5 matrix, also plot CONs in different color
+        set.seed(seed)
+        colors_scatter <- c("#E69F00","grey")
+        names(colors_scatter) <- c("+","-")
+        prot_con <- df$`Potential contaminant`
+        prot_con <- ifelse(prot_con=="+",yes=prot_con, no="-")
+        five_random_indices <- sample(1:length(names), size=5)
+        five_random_indices
+        df_norm_five <- df_norm[,five_random_indices]
+        pairs(df_norm_five[order(prot_con),], panel=my_line, cex.labels=0.9, oma=c(3,3,3,12))
+        par(xpd=TRUE)
+        legend("right", bty="n", legend=c("non-CON", "CON"), col=c("grey", "#E69F00"),pch=16, cex=0.8)
+      }
+    }
+  }
+}
+
+
+## paiwise scatterplot of renormalized intensities if renormalization renormalization to proteins was conducted
+if (!is.null(renormalization_to_proteins)){
+  writeLines("Scatterplot of renormalized proteins:")
+
+  if(ncol(df_norm)< 2){
+    writeLines("not enough samples to create a scatterplot")
+    
+  } else{
+    if (ncol(df_norm) == 2){
+      CON_bool <- df$`Potential contaminant`=="+"
+      norm_proteins_bool <- df$`Gene names` %in% renormalization_to_proteins
+      names(df_norm)
+      plot(df_norm[,1], df_norm[,2], main="", yaxt="n",xaxt="n",yaxt="n", pch=16, col="grey", ylab="", xlab="", cex=1.2)
+      points(df_norm[CON_bool,1], df_norm[CON_bool,2],pch=16, col="#E69F00", cex=1.2)
+      points(df_norm[norm_proteins_bool,1], df_norm[norm_proteins_bool,2],pch=16, col="coral", cex=1.2)
+      abline(a=0,b=1, col="black", lty="dashed")
+      axis(side=1, cex.axis=0.8)
+      axis(side=2, cex.axis=0.8)
+      title(xlab=names(df_norm)[1], ylab=names(df_norm)[2], cex.lab=0.85)
+      legend("bottomright", bty="n", legend=c("non-CON", "CON", "norm proteins"), col=c("grey", "#E69F00", "coral"),pch=16, inset=c(0.02,0.02))
+      
+    } else{
+      if (ncol(df_norm) >= 3 &  ncol(df_norm) <= 5){
+        colors_scatter <- c("#E69F00","grey", "coral")
+        names(colors_scatter) <- c("CON","-", "norm_protein")
+        prot_con<- df$`Potential contaminant`
+        prot_norm_proteins <- df$`Gene names` %in% renormalization_to_proteins
+        prot_con <- ifelse(prot_con=="CON",yes=prot_con, no="-")
+        prot_con <- ifelse(prot_norm_proteins, yes= "norm_protein", no=prot_con)
+        pairs(df_norm[rev(order(prot_con)),], panel=my_line, cex.labels=0.9, oma=c(3,3,3,12))
+        par(xpd=TRUE)
+        legend("right", bty="n", legend=c("non-CON", "CON", "norm proteins"), col=c("grey", "#E69F00", "coral"),pch=16,cex=0.8, inset=-0.03)
+   
+      } else {
+        # randomly select 5 columns and to scatterplot as a 5*5 matrix, also plot CONs in different color
+        set.seed(seed)
+        colors_scatter <- c("#E69F00","grey", "coral")
+        names(colors_scatter) <- c("CON","-", "norm_protein")
+        prot_con<- df$`Potential contaminant`
+        prot_norm_proteins <- df$`Gene names` %in% renormalization_to_proteins
+        prot_con <- ifelse(prot_con=="CON",yes=prot_con, no="-")
+        prot_con <- ifelse(prot_norm_proteins, yes= "norm_protein", no=prot_con)
+        five_random_indices <- sample(1:length(names), size=5)
+        five_random_indices
+        df_norm_five <- df_norm[,five_random_indices]
+        pairs(df_norm_five[order(prot_con),], panel=my_line, cex.labels=0.9, oma=c(3,3,3,12))
+        par(xpd=TRUE)
+        legend("right", bty="n", legend=c("non-CON", "CON", "norm proteins"), col=c("grey", "#E69F00", "coral"),pch=16,cex=0.8, inset=-0.03)
+      }
+    }
+  }
+}
+
+@
+
+\vspace{0.5cm}
+\vspace{0.5cm}
+
+
+
+
+
+
+
+
+
+
+\section {Visualization before Imputation}
+
+\vspace{0.5cm} 
+
+<< extract normalized intensities, echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## extract norm intensity columns as a separate dataframe
+bool_norm <- grepl(names(df), pattern= "norm intensity")
+df_norm <- df[,bool_norm, drop=FALSE]
+
+
+## replace each sample name with a shorter, more convenient version
+colnames(df_norm) <- samplenames
+
+
+## create a matrix and replace NAs with zeros again
+m <- as.matrix(df_norm)
+m_NAs <- m
+m[is.na(m)] <- 0
+
+@
+
+\vspace{0.5cm} 
+
+\subsection{Remaining Missing Values}
+
+<<remaining_missing_values_after_advanced_filtering, echo = FALSE, fig.width =7, fig.height =4, warning = FALSE>>=
+
+vector_percent_NA <- apply(m == 0, MARGIN=2,FUN=mean)
+par(mar=c(8,4,4,2))
+barplot(vector_percent_NA,las=2,main="Relative amount of remaining NAs \n after advanced filtering",border=colors, ylim=c(0,1), names.arg=samplenames,cex.names=0.7,cex.main=0.8, yaxt="n")
+axis(side=2, cex.axis=0.8, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+
+@
+
+\subsection{Heatmap before Imputation}
+
+\vspace{0.5cm}
+
+The following plot is based on log2 normalized intensities of the remaining protein groups (rows). Increasingly brighter colors signify higher intensities. NAs appear as white.
+
+\vspace{0.5cm}
+
+<<heatmap_before_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =9, fig.height =6, fig.align='center',fig.show='hold'>>=
+
+par(mfrow=c(1,1))
+heatmap(m_NAs,
+        Rowv = as.dendrogram(hclust(dist(m))),
+        Colv=as.dendrogram(hclust(dist(t(m)))),
+        margins=c(9,9), cexCol = 1,scale="none",labRow="",col = heatmap_palette(40), ColSideColors = colors, cex.lab=2, na.rm=TRUE)
+legend("right",cex=1.2,legend=unique_groups, pch=16, col=unique(colors), bty="n", inset=0.03)
+
+@
+
+\subsection{PCA before Imputation}
+
+\vspace{0.5cm}
+
+\noindent This plot is based on log2 normalized intensities of all remaining proteins (rows) after filtering, with missing data being set to 0:
+
+\vspace{0.5cm}
+
+<<pca_before_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5, fig.height =3, fig.align="center" >>=
+
+## replace NAs with 0
+df_norm[is.na(df_norm)] <- 0
+
+
+## calculate PCA
+pca_res <- prcomp(t(df_norm))
+rot_mat <- pca_res$rotation
+res_final <- as.matrix(scale(t(df_norm), center=TRUE, scale=FALSE)) %*% rot_mat
+eigenvectors <- pca_res$sdev^2
+fraction_var_pca1 <- round(eigenvectors[1]/sum(eigenvectors),digits=3)
+fraction_var_pca2 <- round(eigenvectors[2]/sum(eigenvectors),digits=3)
+
+
+## plot PCA
+par(xpd=TRUE)
+par(mfrow=c(1,1))
+par(mar=c(3,3,2,7.5))
+par(mgp=c(2,0.7,0))
+plot(res_final[,"PC1"], res_final[,"PC2"], col=colors, cex=0.9, lwd=2, pch=as.numeric(factor_batch), yaxt="n", xaxt="n", ylab="", xlab="")
+axis(side=2, cex.axis = 0.7)
+axis(side=1, cex.axis = 0.7)
+title(xlab=paste0("PC1  ","(",fraction_var_pca1*100,"%",")"), ylab=paste0("PC2  ","(",fraction_var_pca2*100,"%",")"), cex.lab=0.8)
+if(is.null(batch)){
+  legend("right", legend=unique(groups), col=unique(colors), bty="n", inset=-0.45, cex=0.7, pch=1)
+} else{
+  legend("right", legend=samplenames, col=colors, bty="n", inset=-0.45, pch=as.numeric(factor_batch), cex=0.6, lwd=1.5)
+}
+
+@
+ 
+\vspace{0.5cm}
+\vspace{0.5cm}
+
+
+
+
+
+
+
+
+
+
+\section {Imputation of Missing Values}
+
+\vspace{0.5cm}
+
+\noindent In the next step, missing values will be imputed - either by a constant that equals the minimal log2 normalized intensity over all samples, rounded down; or by a downshifted normal distribution. The mode of imputation can be changed via the respective parameter, the current parameter being:
+
+\vspace{0.5cm}
+
+<< imputation settings >>=
+
+print(mode_imputation)
+
+@
+
+<<echo = FALSE, message = FALSE, warning = FALSE, fig.width =7, fig.height =2>>=
+
+## set seed
+set.seed(seed)
+
+
+## extract norm intensity columns 
+bool_norm <- grepl(names(df), pattern= "norm intensity")
+df_norm <- df[,bool_norm, drop=FALSE]
+
+
+## replace zeros with NAs
+df_norm[df_norm==0] <- NA
+
+
+## create a copy
+df_norm_before_imp <- df_norm
+
+
+## print
+writeLines(paste("Before doing imputation, there are", sum(apply(is.na(df_norm), FUN=sum, MARGIN=2)), "missing intensity values."))
+            
+
+#############################################################################
+## Impute when mode is "constant"
+
+if (mode_imputation=="constant"){
+  const <- floor(min(sapply(df_norm, FUN="min", na.rm=TRUE)))
+  df_norm[is.na(df_norm)] <- const
+  writeLines(paste("The constant value that is used for imputation was calculated to be", const))
+}
+
+
+#########################################################################
+## impute when mode is "normal
+ 
+if (mode_imputation=="normal"){
+  for (i in 1:ncol(df_norm)){
+    
+    # extract column i
+    column_i <- df_norm[[i]]
+    
+    # calculate median and sd of column i
+    median_i <- median(column_i, na.rm=TRUE)
+    sd_i <- sd(column_i, na.rm=TRUE)
+    
+    # calculate parameters for distribution of imputed values
+    mu_imputed <- median_i - downshift*sd_i
+    sd_imputed <- width*sd_i
+    
+    # substitute NAs with imputed values
+    ind_i <- which(is.na(column_i))
+    for (j in ind_i){
+      column_i[j] <- rnorm(mean=mu_imputed, sd = sd_imputed, n=1)
+    }
+    
+    # replace old column with new column where NAs are imputed
+    df_norm[[i]] <- column_i
+  }
+}
+
+
+#########################################################################
+## impute when mode is "global"
+ 
+if (mode_imputation=="global"){
+  
+  # calculate global median and global sd 
+  medians <- apply(df_norm, MARGIN = 2, FUN=median, na.rm=TRUE)
+  median_global <- median(medians)
+  median_global
+  sd_global <- sd(as.numeric(as.matrix(df_norm)), na.rm=TRUE)
+  sd_global
+  
+  # calculate parameters for distribution of imputed values. Print details
+  mu_imputed <- median_global - downshift*sd_global
+  sd_imputed <- width*sd_global
+  cat("\n")
+  writeLines("These are the calculated parameters used for global imputation:")
+  writeLines(paste0("mean: ", round(mu_imputed, digits=2)))
+  writeLines(paste0("standard deviation: ", round(sd_imputed, digits=2)))
+  cat("\n")
+  
+  # replace NAs, going through every column  
+  for (i in 1:ncol(df_norm)){
+    
+    # extract column i
+    column_i <- df_norm[[i]]
+    
+    # replace NAs for column i
+    ind_i <- which(is.na(column_i))
+    for (j in ind_i){
+      column_i[j] <- rnorm(mean=mu_imputed, sd = sd_imputed, n=1)
+    }
+    
+    # replace old column with new column where NAs are imputed
+    df_norm[[i]] <- column_i
+  }
+}
+
+
+
+#########################################################################
+## impute when mode is "none"
+
+if (mode_imputation=="none"){
+  # nothing happens ;)
+}
+
+
+
+
+
+
+## print
+cat("\n")
+writeLines(paste("After doing imputation,", sum(apply(is.na(df_norm), FUN=sum, MARGIN=2)), "missing intensity values remain."))
+
+
+## finally, add imputed values to dataframe:
+names(df_norm) <- paste0("norm imp intensity ",samplenames)
+df_imp <- df_norm
+df <- cbind(df, df_imp)
+
+@
+
+\vspace{0.5cm}
+
+\noindent Plotting the distribution of log2 intensities before and after imputation for each sample:
+
+\vspace{0.5cm}
+
+<<imputation_before_and_after, echo = FALSE, message = FALSE, warning = FALSE, fig.width =6, fig.height =1.4>>=
+
+## calculate some variables for upcoming histograms
+par(mfrow=c(1,2))
+par(mar=c(1.5,4,1,0))
+xmin <- min(sapply(df_imp, FUN=min, na.rm=TRUE))
+xmax <- max(sapply(df_imp, FUN=max, na.rm=TRUE))
+ymax <- max(sapply(lapply(lapply(df_imp, FUN=cut, breaks=30),FUN=table), FUN=max))
+if (mode_imputation != "constant"){
+  ymax <- ymax + ymax*2/10
+}
+
+
+## plot histograms
+for (l in 1:ncol(df_imp)){
+  col_l <- colors[l]
+  hist(df_norm_before_imp[[l]], col=col_l, breaks = seq(xmin - 1 ,xmax + 1, length.out=30), main= paste(samplenames[l], "before Imputation"), xlim=c(xmin-1,xmax-1), cex.main=0.5, yaxt="n", xaxt="n", ylim=c(0,ymax),ylab="")
+  axis(side=1, cex.axis=0.4, mgp=c(0,0.3,0), lwd.ticks=0.5)
+  axis(side=2, cex.axis=0.4, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+  hist(df_imp[[l]], col=col_l, breaks = seq(xmin -1,xmax + 1, length.out=30), main = paste(samplenames[l], "after Imputation"), xlim = c(xmin-1,xmax-1), cex.main=0.5, yaxt="n", xaxt="n", ylim=c(0,ymax), ylab="")
+  axis(side=1, cex.axis=0.4, mgp=c(0,0.3,0), lwd.ticks=0.5)
+  axis(side=2, cex.axis=0.4, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+}
+
+@
+
+\vspace{0.5cm}
+\vspace{0.5cm}
+
+
+
+
+
+
+
+
+
+
+\section {Visualization after Imputation}
+
+\vspace{0.5cm} 
+
+\noindent The following visualizations are based on log2 normalized imputed intensities of all remaining proteins (rows), with missing data being already imputed.
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+## extract normalized imputed intensities
+bool_imp <- grepl(names(df), pattern="norm imp")
+df_imp <- df[,bool_imp]                  
+
+
+## replace each sample name with a shorter, more convenient version
+colnames(df_imp) <- samplenames
+
+
+## convert to matrix 
+m <- as.matrix(df_imp)
+
+@
+
+\vspace{0.5cm} 
+
+\subsection{Heatmap after Imputation}
+
+\vspace{0.5cm}
+
+<<heatmap_after_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =9, fig.height =6, fig.align='center',fig.show='hold'>>=
+
+## make sure a matrix without NAs is used to calculate hclust distances
+m_noNA <- m
+m_noNA[is.na(m_noNA)] <- 0
+
+## plot heatmap
+par(mfrow=c(1,1))
+heatmap(m,
+        Rowv = as.dendrogram(hclust(dist(m_noNA))),
+        Colv=as.dendrogram(hclust(dist(t(m_noNA)))),
+        margins=c(9,9), cexCol = 1,scale="none",labRow="",col = heatmap_palette(40), ColSideColors = colors, cex.lab=2, na.rm=TRUE)
+legend("right",cex=1.2,legend=unique_groups, pch=16, col=unique(colors), bty="n", inset=0.03)
+
+@
+
+\subsection{PCA after Imputation}
+
+\vspace{0.5cm}
+
+<<pca_after_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5, fig.height =3, fig.align="center">>=
+
+## replace NAs with 0
+df_imp[is.na(df_imp)] <- 0
+
+
+## calculate PCA
+pca_res <- prcomp(t(df_imp))
+rot_mat <- pca_res$rotation
+res_final <- as.matrix(scale(t(df_imp), center=TRUE, scale=FALSE)) %*% rot_mat
+eigenvectors <- pca_res$sdev^2
+fraction_var_pca1 <- round(eigenvectors[1]/sum(eigenvectors),digits=3)
+fraction_var_pca2 <- round(eigenvectors[2]/sum(eigenvectors),digits=3)
+
+
+## plot PCA
+par(xpd=TRUE)
+par(mfrow=c(1,1))
+par(mar=c(3,3,2,7.5))
+par(mgp=c(2,0.7,0))
+plot(res_final[,"PC1"], res_final[,"PC2"], col=colors, cex=0.9, lwd=2, pch=as.numeric(factor_batch), yaxt="n", xaxt="n", ylab="", xlab="")
+axis(side=2, cex.axis = 0.7)
+axis(side=1, cex.axis = 0.7)
+title(xlab=paste0("PC1  ","(",fraction_var_pca1*100,"%",")"), ylab=paste0("PC2  ","(",fraction_var_pca2*100,"%",")"), cex.lab=0.8)
+if(is.null(batch)){
+  legend("right", legend=unique(groups), col=unique(colors), bty="n", inset=-0.45, cex=0.7, pch=1)
+} else{
+  legend("right", legend=samplenames, col=colors, bty="n", inset=-0.45, pch=as.numeric(factor_batch), cex=0.6, lwd=1.5)
+  
+}
+
+@
+ 
+\vspace{0.5cm} 
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+\section{Statistical Pairwise Comparison of Groups} 
+
+\vspace{0.5cm} 
+
+\subsection{Overview}
+
+\vspace{0.5cm} 
+
+\noindent In this section, Cassiopeia does statistical comparisons of groups using the LIMMA (Linear Models for Microarray Data) package from the R Bioconductor repository. Similar to the classical t-test, LIMMA tests for the equality of norm intensity means in two different groups for each protein of proteinGroups.txt (barring those proteins that were removed during filtering). The number of group comparisons in this report are
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+writeLines(paste0(length(pairwise_comp), " (out of ", choose(length(unique_groups), 2), " possible distinct pairwise group comparisons)"))
+
+@
+
+\noindent and the groups that are to be compared will be:
+
+<<echo = FALSE, message = FALSE, warning = FALSE>>=
+
+print(pairwise_comp)
+
+@
+
+\vspace{0.5cm} 
+
+\subsection{Results}
+
+<<pairwise_comparison_using_limma, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5.5, fig.height =4, fig.align="center">>=
+
+## extract normalized imputed intensities
+bool_imp <- grepl(names(df), pattern="norm imp")
+df_imp <- df[,bool_imp]                  
+
+
+## eplace column names with a shorter version specified by the user
+colnames(df_imp) <- samplenames
+
+
+## conduct pairwise comparison between groups using limma
+if (!is.null(pairwise_comp)){
+  
+  # loop over all specified pairwise comparisons
+  for (l in 1:length(pairwise_comp)){
+    
+    # print the current pairwise comparison
+    writeLines("#####################################################################")
+    writeLines("#####################################################################")
+    writeLines("#####################################################################")
+    writeLines(paste0("########## " ,l, ") ", "Comparison of ", pairwise_comp[[l]][1] , " vs ", pairwise_comp[[l]][2], ":", " ##########"))
+    
+    # extract group names, and extract relevant intensity columns
+    group1 <- pairwise_comp[[l]][1]
+    group2 <- pairwise_comp[[l]][2]
+    relevant_df_imp <-  cbind(df_imp[, groups==group1, drop=FALSE],df_imp[, groups==group2, drop=FALSE])
+    
+    # determine and print the relevant sample names + groups in question
+    cat("\n")
+    writeLines("These are the relevant samples for this comparison:")
+    cat("\n")
+    relevant_sample_names <- colnames(relevant_df_imp)
+    relevant_sample_names
+    relevant_group_names <- c(groups[groups==group1],groups[groups==group2])
+    relevant_group_names
+    temp <- rbind(relevant_sample_names,relevant_group_names)
+    if (!is.null(batch)){
+      batch_variable <- c(factor_batch[groups==group1],factor_batch[groups==group2])
+      temp <- rbind(temp, batch_variable)
+    }
+    print(t(temp))
+    cat("\n")
+    
+    # if there are only two samples to be compared, skip limma and instead only do MA plot
+    if (ncol(relevant_df_imp) == 2){
+      writeLines("There is only one sample per group, hence limma is not possible.")
+      writeLines("MA plot comparing two samples")
+      df_plot_l <- data.frame(`Nice names`= df$`Nice names`, logFC = c(relevant_df_imp[,2] - relevant_df_imp[,1]), AveExpr = rowMeans(relevant_df_imp), check.names=FALSE)
+      x_extreme <- max(abs(df_plot_l$logFC))
+      par(xpd=TRUE)
+      par(mfrow=c(1,1))
+      par(mar=c(5,4,4,9))
+      par(mgp=c(2.5, 0.7, 0))
+      par(font.axis=1)
+      plot(x= df_plot_l$logFC, y= df_plot_l$AveExpr,
+           pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "Average imp Intensity",main= "MA Plot", 
+           cex.lab=0.7, cex.main= 0.8, font.lab=2, col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255), xlim=c(-x_extreme,x_extreme), bty="L")
+      axis(side=1, cex.axis=0.7)
+      axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+      if (!is.null(proteins_of_special_interest) & any(proteins_of_special_interest %in% df$`Nice names`)){
+        df_plot_l_special_interest <- df_plot_l[df_plot_l$`Nice names` %in% proteins_of_special_interest,]
+        points(df_plot_l_special_interest$logFC, df_plot_l_special_interest$AveExpr, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)])
+        legend("right", legend=df_plot_l_special_interest$`Nice names`, col = col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
+      }
+      # add logFC and AveExp to dataframe
+      df_comparison_results <- df_plot_l[, c("logFC", "AveExpr")]
+      new_colnames <- paste0(colnames(df_comparison_results),"_",group2,"__vs__",group1)
+      colnames(df_comparison_results) <- new_colnames
+      df <- cbind(df, df_comparison_results)
+      next
+    }
+    
+    # create design matrix for LIMMA, also reorder design according to how groups are entered in pairwise_comp (otherwise model.matrix does its own ordering based on alphabetical order!)
+    design <- model.matrix(~factor(relevant_group_names, levels=c(group1, group2)))
+    colnames(design) <- c(group1,group2)
+    
+    # calculate Limma (LIMMAresults), including batch effects into the model as random effects if specified
+    if (is.null(batch)){
+      fit <- lmFit(relevant_df_imp, design)
+      fit_ebayes <- eBayes(fit, trend = trend_limma)
+      LIMMAresults <- topTable(fit_ebayes, number=Inf, coef = group2, adjust="BH", sort.by="none")
+    } else{
+      writeLines("The batch variable will be included as a random effect in the linear model!")
+      writeLines("This allows for modelling of non-zero covariances")
+      writeLines("for observations that originate from the same batch.")  
+      dupcor <- duplicateCorrelation(relevant_df_imp,design,block=batch_variable)
+      fit <- lmFit(relevant_df_imp, design, block= batch_variable, correlation = dupcor$consensus)
+      fit_ebayes <- eBayes(fit)
+      LIMMAresults <- topTable(fit_ebayes, number=Inf, coef= group2, adjust="BH", sort.by="none")     
+    }
+    cat("\n")
+    
+    # get every relevant column for plotting
+    df_plot_l <- data.frame(`Nice names`= df$`Nice names`, logFC=LIMMAresults$logFC, p=LIMMAresults$P.Value, adj.p=LIMMAresults$adj.P.Val, AveExpr=LIMMAresults$AveExpr, check.names=FALSE)
+    df_plot_l <- cbind(df_plot_l, relevant_df_imp)
+    neg_log_pval <- -log(df_plot_l$p, base=10)
+    
+    # determine top 10 significant proteins
+    temp <- sort(neg_log_pval, decreasing=TRUE)[plot_number]
+    bool_significant_10 <- neg_log_pval >= temp & !is.na(df_plot_l$p) 
+    df_plot_l_significant_10 <- df_plot_l[bool_significant_10,]
+    neg_log_pval_significant_10 <- -log(df_plot_l_significant_10$p, base=10)
+    
+    # calculate relevant plot variable
+    x_extreme <- range(df_plot_l$logFC, na.rm = TRUE)
+    x_extreme <- abs(x_extreme)
+    x_extreme <- ceiling(max(x_extreme))
+    
+    # plot volcano with coloring based on adj.p-value significance
+    writeLines("Volcano plot highlighting different ranges of adj. p-values:")
+    par(xpd=TRUE)
+    par(mfrow=c(1,1))
+    par(mar=c(5,4,4,9))
+    par(mgp=c(2.5, 0.7, 0))
+    par(font.axis=1)
+    plot(x= df_plot_l$logFC, y= neg_log_pval,
+         pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "- log10 (p-value)",main= "Volcano Plot", 
+         cex.lab=0.7, cex.main= 0.8, font.lab=2, col="grey", xlim=c(-x_extreme,x_extreme), bty="L", type="n")
+    axis(side=1, cex.axis=0.7)
+    axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+    points(df_plot_l$logFC[df_plot_l$adj.p >= 0.05], neg_log_pval[df_plot_l$adj.p >= 0.05], pch=16, cex=0.9, xaxt="n", col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255))
+    points(df_plot_l$logFC[df_plot_l$adj.p < 0.05 & df_plot_l$adj.p >= 0.01], neg_log_pval[df_plot_l$adj.p < 0.05 & df_plot_l$adj.p >= 0.01], pch=16, cex=0.9, xaxt="n", col=rgb(red=250, green=200, blue=0, alpha=100, maxColorValue = 255))
+    points(df_plot_l$logFC[df_plot_l$adj.p < 0.01 & df_plot_l$adj.p >= 0.001], neg_log_pval[df_plot_l$adj.p < 0.01 & df_plot_l$adj.p >= 0.001], pch=16, cex=0.9, xaxt="n", col=rgb(red=245, green=130, blue=0, alpha=100, maxColorValue = 255))
+    points(df_plot_l$logFC[df_plot_l$adj.p < 0.001], neg_log_pval[df_plot_l$adj.p < 0.001], pch=16, cex=0.9, xaxt="n", col=rgb(red=255, green=50, blue=50, alpha=100, maxColorValue = 255))
+    legend("right", bty="n", legend=c("non-significant", "adj. pval < 0.05", "adj. pval < 0.01","adj. pval < 0.001"), 
+           col=c(rgb(red=200, green=200, blue=200, alpha=255, maxColorValue = 255), 
+                 rgb(red=250, green=200, blue=0, alpha=255, maxColorValue = 255),
+                 rgb(red=250, green=130, blue=0, alpha=100, maxColorValue = 255),
+                 rgb(red=255, green=50, blue=50, alpha=100, maxColorValue = 255)),
+           pch=16, inset=c(-0.5,0), cex=0.7)
+    
+    # plot volcano plot with coloring based on imputed or non-imputed intensities
+    if(mode_imputation != "none"){
+      writeLines("Volcano plot highlighting imputation:")
+      df_norm <- df[,grepl(names(df), pattern="^norm intensity")]
+      df_norm_relevant <- cbind(df_norm[, groups==group1, drop=FALSE],df_norm[, groups==group2, drop=FALSE])
+      contains_NA <- apply(is.na(df_norm_relevant), FUN=any, MARGIN = 1)
+      contains_NA[1:10]
+      par(xpd=TRUE)
+      par(mfrow=c(1,1))
+      par(mar=c(5,4,4,9))
+      par(mgp=c(2.5, 0.7, 0))
+      par(font.axis=1)
+          plot(x= df_plot_l$logFC, y= neg_log_pval,
+           pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "- log10 (p-value)",main= "Volcano Plot", 
+           cex.lab=0.7, cex.main= 0.8, font.lab=2, col="grey", xlim=c(-x_extreme,x_extreme), bty="L", type="n")
+      axis(side=1, cex.axis=0.7)
+      axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+      points(df_plot_l$logFC[!contains_NA], neg_log_pval[!contains_NA],pch=16, cex=0.9, xaxt="n", col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255))
+      points(df_plot_l$logFC[contains_NA], neg_log_pval[contains_NA],pch=16, cex=0.9, xaxt="n", col=rgb(red=30, green=100, blue=200, alpha=200, maxColorValue = 255))
+      legend("right", bty="n", legend=c("non-imputed", "partially imputed"), 
+             col=c(rgb(red=200, green=200, blue=200, alpha=200, maxColorValue = 255),rgb(red=30, green=100, blue=200, alpha=200, maxColorValue = 255)),
+             pch=16, inset=c(-0.5,0), cex=0.7)
+    }
+
+    # plot standard volcano plot showcasing top significant proteins. Then print table of top 10 significant proteins
+    writeLines("Volcano plot highlighting top sigfnificant proteins:")
+    par(mfrow=c(1,1))
+    par(mar=c(5,4,4,9))
+    plot(x= df_plot_l$logFC, y= neg_log_pval,
+         pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "- log10 (p-value)",main= "Volcano Plot",
+         cex.lab=0.7, cex.main= 0.8, font.lab=2, col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255), xlim=c(-x_extreme,x_extreme), bty="L")
+    axis(side=1, cex.axis=0.7)
+    axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+    points(df_plot_l_significant_10$logFC, neg_log_pval_significant_10, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)])
+    legend("right", legend=df_plot_l_significant_10$`Nice names`, col = col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
+    writeLines("Relevant statistics for the top significant proteins:")
+    print_df_plot_l_significant_10 <-  df_plot_l_significant_10
+    print_df_plot_l_significant_10 <- print_df_plot_l_significant_10[order(print_df_plot_l_significant_10$p, decreasing=FALSE),]
+    print_df_plot_l_significant_10[,"logFC"] <- round(print_df_plot_l_significant_10[,"logFC"], digits=2)
+    print_df_plot_l_significant_10[,"p"] <- formatC(print_df_plot_l_significant_10[,"p"], format = "e", digits = 2)
+    print_df_plot_l_significant_10[,"adj.p"] <- formatC(print_df_plot_l_significant_10[,"adj.p"], format = "e", digits = 2)
+    print(print_df_plot_l_significant_10[,c("Nice names", "logFC", "p", "adj.p")])
+    cat("\n")
+    cat("\n")
+    
+    # plot MA plot showcasing top significant proteins
+    writeLines("MA plot for top significant proteins:")
+      plot(x= df_plot_l$logFC, y= df_plot_l$AveExpr, 
+           pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "Average imp Intensity",main= "MA Plot",
+           cex.lab=0.7, cex.main= 0.8, font.lab=2, col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255), xlim=c(-x_extreme,x_extreme), bty="L")
+    axis(side=1, cex.axis=0.7)
+    axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+    points(df_plot_l_significant_10$logFC, df_plot_l_significant_10$AveExpr, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)])
+    legend("right", legend=df_plot_l_significant_10$`Nice names`, col = col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
+    
+    # plot volcano plot, MA plot and profile plot for proteins of special interest (if specified)
+    if (!is.null(proteins_of_special_interest) & any(proteins_of_special_interest %in% df$`Nice names`)){
+      bool_rows_proteins_of_special_interest <- df_plot_l$`Nice names` %in% proteins_of_special_interest 
+      df_plot_l_special_interest <- df_plot_l[bool_rows_proteins_of_special_interest,  c("Nice names", "logFC", "adj.p", "p", "AveExpr")]  
+      writeLines("Volcano plot for proteins of special interest:")
+      par(xpd=TRUE)
+      par(mfrow=c(1,1))
+      par(mar=c(5,4,4,9))
+      par(mgp=c(2.5, 0.7, 0))
+      par(font.axis=1)
+      x_extreme <- range(df_plot_l$logFC, na.rm=TRUE)
+      x_extreme <- abs(x_extreme)
+      x_extreme <- ceiling(max(x_extreme))
+      plot(x= df_plot_l$logFC, y= neg_log_pval,
+           pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "- log10 (p-value)",main= "Volcano Plot",
+           cex.lab=0.7, cex.main= 0.8, font.lab=2, col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255), xlim=c(-x_extreme,x_extreme), bty="L")
+      axis(side=1, cex.axis=0.7)
+      axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+      points(df_plot_l_special_interest$logFC, neg_log_pval[bool_rows_proteins_of_special_interest], pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)])
+      legend("right", legend=df_plot_l_special_interest$`Nice names`, col = col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
+    
+      writeLines("Relevant statistics for the proteins of special interest:")
+      print_df_plot_l_special_interest <- df_plot_l_special_interest
+      print_df_plot_l_special_interest[,"logFC"] <- round(print_df_plot_l_special_interest[,"logFC"], digits=2)
+      print_df_plot_l_special_interest[,"p"] <- formatC(print_df_plot_l_special_interest[,"p"], format = "e", digits = 2)
+      print_df_plot_l_special_interest[,"adj.p"] <- formatC(print_df_plot_l_special_interest[,"adj.p"], format = "e", digits = 2)
+      print(print_df_plot_l_special_interest[,c("Nice names", "logFC", "p", "adj.p")])
+      cat("\n")
+      
+      writeLines("And their corresponding imp intensities:")
+      df_temp <- cbind(df_plot_l_special_interest$`Nice names`, round(relevant_df_imp[bool_rows_proteins_of_special_interest,,drop=FALSE], digits=2))
+      temp_colnames <- colnames(df_temp)
+      temp_colnames[1] <- "Nice names"
+      colnames(df_temp) <- temp_colnames
+      print(df_temp)
+      cat("\n")
+      
+      writeLines("Profile plot for proteins of special interest:")
+      head(df_temp)
+      names(colors) <- samplenames
+      length_profile_plot <- length(relevant_sample_names)
+      length_profile_plot
+      profile_plot_imps <- relevant_df_imp[bool_rows_proteins_of_special_interest,, drop=FALSE]
+      head(profile_plot_imps)
+      ylim_profile_plot <- range(profile_plot_imps, na.rm = TRUE)
+      par(mfrow=c(1,1))
+      par(mgp=c(2.5, 0.7, 0))
+      par(mar=c(7,4,6,5))
+      plot(x=1:length_profile_plot, y=profile_plot_imps[1,], type = "n", ylim = ylim_profile_plot, main="", ylab="", xlab="", xaxt="n", yaxt="n", bty="L")
+      
+      for (n in 1:nrow(profile_plot_imps)){
+        y_n <- profile_plot_imps[n,]
+        points(x=1:length_profile_plot, y=y_n, pch=16, col= col_all_proteins[as.character(df_temp$`Nice names`[n])], cex=1.5)
+        points(x=1:length_profile_plot, y=y_n, pch=16, col= col_all_proteins[as.character(df_temp$`Nice names`[n])], type="l",lty="longdash", lwd=2)
+        legend("right", legend=df_plot_l_special_interest$`Nice names`, col = col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-0.2)
+        axis(side=1, at=1:length_profile_plot, labels=colnames(profile_plot_imps), las=2, cex.axis=0.5)
+        axis(side=2, cex.axis=0.6, las=2)
+        title(ylab="log2 imp Intensity", cex.lab=0.7, main="Profile Plot", cex.main=0.8)
+      }
+      
+      par(xpd=TRUE)
+      par(mfrow=c(1,1))
+      par(mar=c(5,4,4,9))
+      par(mgp=c(2.5, 0.7, 0))
+      par(font.axis=1)
+      writeLines("MA plot for proteins of special interest:")
+      plot(x= df_plot_l$logFC, y= df_plot_l$AveExpr, 
+           pch=16, cex=0.9, xaxt="n", yaxt="n", xlab= paste0(group2, " / ", group1, " \nfold change [log2]" ), ylab = "Average imp Intensity",main= "MA Plot",
+           cex.lab=0.7, cex.main= 0.8, font.lab=2, col=rgb(red=200, green=200, blue=200, alpha=100, maxColorValue = 255), xlim=c(-x_extreme,x_extreme), bty="L")
+      axis(side=1, cex.axis=0.7)
+      axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
+      points(df_plot_l_special_interest$logFC, df_plot_l_special_interest$AveExpr, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)])
+      legend("right", legend=df_plot_l_special_interest$`Nice names`, col = col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
+    }
+    
+    # plot distribution of p-values and adjusted p-values as histogram
+    writeLines("Distribution of p-values and adjusted p-values:")
+    ind_pval <- which(grepl(names(LIMMAresults), pattern="^P[.]Val"))
+    ind_adjpval <- which(grepl(names(LIMMAresults), pattern="^adj[.]P[.]Val"))
+    ymax<- sort(table(cut(LIMMAresults[,ind_pval], breaks=seq(from=0,to=1,length.out = 26))), decreasing = TRUE)[1]
+    ymax
+    par(mfrow=c(2,1))
+    par(mgp=c(1.6, 0.7, 0))
+    par(mar=c(1,4,3,9))
+    hist(LIMMAresults[,ind_pval], breaks=20, border="#999999", col="#999999", xaxt="n", yaxt="n", ylim=c(0,ymax), xlim=c(0,1), main="", ylab="", xlab="")
+    axis(side=2,cex.axis=0.6)
+    axis(side=1, at= seq(0,1,by=0.2), cex.axis=0.6)
+    title(main=paste0(group1, " vs ", group2), cex.main=0.7, cex.lab=0.7, ylab="frequency \n (p-values) ")
+    par(mar=c(3,4,1,9))
+    hist(LIMMAresults[,ind_adjpval], breaks=20, border="#E69F00", col="#E69F00", xaxt="n", yaxt="n", ylim=c(0,ymax), xlim=c(0,1), main="", ylab="", xlab="")
+    axis(side=2,cex.axis=0.6)
+    axis(side=1, at= seq(0,1,by=0.2), cex.axis=0.6)
+    title(cex.main=0.7, cex.lab=0.7, ylab="frequency \n (adj. p-values) ")
+    writeLines("Note:")
+    writeLines("For proteins where H0 is true (i.e. no differential expression),")
+    writeLines("p-values should be uniformly distributed.")  
+    writeLines("The first bar to the very left corresponds to p-vales values that are < 0.05.")
+    cat("\n")
+    cat("\n")
+    cat("\n")
+    
+    # give LIMMAresults new colnames based on which groups were compared, then bind it to the dataframe
+    new_colnames <- paste0(colnames(LIMMAresults),"_",group2,"__vs__",group1)
+    colnames(LIMMAresults) <- new_colnames
+    df <- cbind(df, LIMMAresults)
+  }
+}
+
+@
+
+\noindent Note that protein identities were displayed/listed via "Nice names", which correspond to proteins' gene names (column: "Gene names") reduced to just the first entry if multiple entries are separated by ";".
+
+\vspace{0.5cm} 
+\vspace{0.5cm} 
+
+
+
+
+
+
+
+
+
+
+\section{Exploratory Cluster Analysis with k-Means}
+
+\vspace{0.5cm}
+
+\subsection{Optimal k}
+
+<<>>=
+
+print(infer_optimal_number_of_clusters)
+@
+
+<<K_means_clustering_optimal_k, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5.5, fig.height =3, fig.align="center">>=
+
+if (infer_optimal_number_of_clusters){
+  
+  # convert imp dataframe to matrix
+  m_imp <- as.matrix(df_imp)
+  rownames(m_imp) <- df$`Gene names`
+  
+  # before k-means clustering, normalize datamatrix to achieve equal rowmeans
+  m_norm_imp<- sweep(m_imp, STATS= rowMeans(m_imp), FUN="/", MARGIN = 1)*mean(rowMeans(m_imp))
+
+  # do k-means clustering for each k in 2:20,  and store within Sum of Squares
+  k_test <- 2:20
+  N <- nrow(m_norm_imp)
+  within_ss <- numeric(length(k_test))
+  names(within_ss) <- k_test
+  for (k in k_test){
+    KM_k <- kmeans(m_norm_imp,k, iter.max = 30,nstart=2)
+    within_ss[as.character(k)] <- sum(KM_k$withinss)
+  }
+  
+  # plot SSwithin vs number of clusters
+  par(mar=c(4,4,2,2))
+  par(mfrow=c(1,1))
+  plot(y=within_ss,x=k_test,cex.main=0.8, cex.main=0.8,yaxt="n", xaxt="n", pch=16, ylab="", xlab="", type="n")
+  points(y=within_ss,x=k_test, col="#E69F00", pch=16, cex=1.5)
+  lines(y=within_ss,x=k_test, lty = 3)
+  axis(side=2, cex.axis=0.6, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
+  axis(side=1, cex.axis=0.6, mgp=c(0,0.4,0), lwd.ticks=0.5, at=2:20)
+  title(ylab="Sum of Squares Within", xlab="number of clusters (k)", cex.lab=0.75, main="SSwithin for different k", cex.main=0.9,mgp=c(2.3,0.7,0))
+
+writeLines("Choose k where:")
+writeLines("The reduction in Sum of Squares Within becomes negligible.")
+}
+
+@
+
+\vspace{0.5cm}
+
+\subsection{The k Cluster Centers}
+
+<< k-means cluster settings>>=
+
+print(number_of_clusters)
+print(export_clusters)
+@
+
+\noindent Note that before k-Means Clustering, the mean intensity of each protein group (row) is shifted towards a common universal mean, resulting in equal central tendencies for all protein groups (rows). This way, protein groups with similar expression patterns will fall into the same cluster, regardless of differences in absolute expression levels.
+
+<<K_means_clustering_silhouette_plot_and_cluster_centers_dendrogrogram, echo = FALSE, message = FALSE, warning = FALSE, fig.width =6, fig.height =4.5, fig.align="center">>=
+
+if (!is.null(number_of_clusters)){
+  
+  # convert imp dataframe into matrix
+  m_imp <- as.matrix(df_imp)
+  rownames(m_imp) <- df$`Gene names`
+  
+  # if desired, reorder column order according to alphabetically-sorted group-vector
+  if (reorder_samples_for_k_means_clustering){
+    m_imp <- m_imp[,order(groups)]
+    colors_kmeans <- colors[order(groups)]
+    samplenames_kmeans <- samplenames[order(groups)]
+  } else {
+    colors_kmeans <- colors
+    samplenames_kmeans <- samplenames
+  }
+  
+  # before k-means clustering, normalize datamatrix to achieve equal rowmeans
+  m_norm_imp<- sweep(m_imp, STATS= rowMeans(m_imp), FUN="/", MARGIN = 1)*mean(rowMeans(m_imp))
+  
+  
+  #############################################################################
+  # do k-means clustering with k clusters
+  
+  # relevant parameters
+  k <- number_of_clusters
+  KM <- kmeans(m_norm_imp,k, iter.max = 50,nstart=25)
+  centers <- KM$centers
+  table_n <- table(KM$cluster)
+  
+  # store clusterallocation, add it to dataframe
+  clusters <- KM$cluster
+  df$`k Means Cluster` <- clusters
+  length(clusters)
+  
+  # export clusters if desired
+  if (export_clusters){
+    
+    # create folder if non-existent
+    if (!"clusters" %in% list.files()){
+      dir.create("clusters")
+    }
+    
+    # create filepath
+    wd <- getwd()
+    cluster_filepath <- paste0(wd, "/clusters")
+    
+    # create txt-file with all pgene names (serves as reference)
+    write.table(df$`Gene names`, file=paste0(cluster_filepath, "/Gene_names_all.txt"), row.names = FALSE, col.names = FALSE, quote=FALSE)
+    
+    # create txt-file with gene names for each of the k clusters
+    for (i in 1:k){
+      
+      filepath_k <- paste0(cluster_filepath, "/Gene_names_cluster_", i, ".txt")
+      write.table(df$`Gene names`[df$`k Means Cluster` == i], file=filepath_k, row.names = FALSE, col.names = FALSE, quote=FALSE)
+      
+    }
+  }
+  
+  
+  #######################################################################
+  # silhouette plot
+  
+  # function that calculates euclidian distance of two points a and b:
+  euclid <- function(a,b){       
+    res <-  sqrt( sum((a-b)^2) )
+    return(res)
+  }
+    
+  # function that calculates distance of between a single point and many points stored in matrix x
+  s.distanzen <- function(x, point){
+    n <- nrow(x)
+    dist <- numeric(nrow(x))
+    for(i in 1:n){
+      punkt <- x[i,]
+      dist[i] <- euclid(point, punkt)
+    }
+    return(dist)
+  }
+  
+  # initialize needed objects, then calculate silhoutte values
+  pastel_color_palette <- colorRampPalette(brewer.pal(9,"Pastel1"))
+  col_clusters <- pastel_color_palette(k)
+  names(col_clusters) <- as.character(1:k)
+  clusters_sil <- vector(mode="list", length= k)
+  silhouette <- numeric(nrow(m_norm_imp))
+  silhouette_list <- vector("list",k)
+  # for-loop that calculates silhouette value for each point
+  for(i in 1:nrow(m_norm_imp)){
+    point <-  m_norm_imp[i,,drop = FALSE]
+    cluster_i <- clusters[i]
+    silres <- s.distanzen(m_norm_imp,point)
+    for(j in 1:k){ 
+        clusters_sil[[j]] <- silres[clusters == j]
+    }
+    sil.a <- mean(clusters_sil[[cluster_i]])
+    sil.b <- min(sapply(clusters_sil[-cluster_i],mean))
+    silhouette[i] <- (sil.b-sil.a)/max(sil.b,sil.a)
+    silhouette_list[[cluster_i]] <- append(silhouette_list[[cluster_i]],silhouette[i])
+  }
+  sorted_silhouette_list <- sapply(silhouette_list,sort,decreasing = TRUE)
+  npoint_clusters <- sapply(sorted_silhouette_list, length)
+  res <- rep(1:k,times = npoint_clusters)
+  y <- seq(10,0, length.out = length(silhouette))
+  
+  # plot
+  par(mar=c(4,4.5,4,4.5))  
+  plot(silhouette,y,type="n",axes = FALSE, ylab="", xlab="",xlim=c(-1,1))
+  axis(side = 1, cex.axis=0.8)
+  title(main="K-Means \n Silhouette Plot", cex.main=0.95)
+  title(xlab="silhouette values", cex.lab=0.75, mgp=c(2,1,0))
+  for (i in 1:k){
+    polygon(c(0,sorted_silhouette_list[[i]],0),c(max(y[res == i]),y[res == i],min(y[res == i])),col=col_clusters[as.character(i)])
+  }
+  mean_silhouette <- mean(silhouette)
+  abline(v=mean_silhouette, lty="dashed")
+  legend("right", title="Cluster", legend= paste0( 1:k), fill=col_clusters, bty="n", cex=0.9)
+  
+  # print
+  writeLines(paste0("The mean of all silhouette values for this clustering is " , round(mean_silhouette,digit=2)))
+  writeLines(paste0("Note: points with high silhouette values are clustered well"))
+
+  
+  ###########################################################################
+  # dendrogram of cluster centers
+
+  dist_mat_centers <- dist(centers)
+  hclust_centers <- hclust(dist_mat_centers)
+  dend_hclust_centers <- as.dendrogram(hclust_centers)
+  dend_hclust_centers <- dend_hclust_centers %>% set("branches_lwd",4)
+  plot(dend_hclust_centers, main = "Dendrogram of Cluster Centers",las=1, ylab="euclidian distance")
+  
+  # print
+  writeLines(paste0("This dendrogram shows an agglomerative clustering of the k-means cluster centers."))
+  writeLines(paste0("Distances are ultrametric. "))
+}
+  
+@  
+  
+\vspace{0.5cm} 
+\vspace{0.5cm} 
+  
+<<k_means_clustering_cluster_centers, echo = FALSE, message = FALSE, warning = FALSE, fig.width =6.5, fig.height =4, fig.align="center">>=
+
+## plot the resulting clusters with cluster centers
+if (!is.null(number_of_clusters)){  
+  
+  # plot centers as points and some proteins as lines
+  par(mar=c(6,4.5,4,4.5))
+  par(mgp=c(3,1,0))
+  min_center <- quantile(m_norm_imp, probs=0.001)
+  max_center <- quantile(m_norm_imp, probs=0.999)
+  x_axis <- 1:ncol(centers)
+  
+  for (i in hclust_centers$order){
+    
+    #create empty plot
+    plot(x_axis, centers[i,], xaxt="n", col=colors_kmeans, pch=16, ylab="", xlab="", ylim=c(min_center,max_center), main=paste0("K-Means \n Center of Cluster ",i, " (n=", table_n[i], ")"), cex=1.5, type="n", yaxt="n", cex.main=0.9)
+    axis(side=1, labels=samplenames_kmeans, at=x_axis, cex.axis=0.5, las=2)
+    axis(side=2, cex.axis=0.75)
+    title(ylab="scaled imp Intensities", cex.lab=0.75)
+    bool_i <- clusters == i
+    m_norm_imp_i <- m_norm_imp[bool_i,]
+    
+    # check if any proteins of special interest are in this cluster
+    bool_proteins_of_special_interest_i <- proteins_of_special_interest %in% rownames(m_norm_imp_i)
+    
+    # plot lines of all proteins
+    for(j in sample(1:nrow(m_norm_imp_i))){
+      lines(x_axis, m_norm_imp_i[j,], xaxt="n", xlab="", ylim=c(min_center,max_center), lty=2, col="black", lwd=0.1)
+    }
+    
+    # plot lines of proteins of special interest in color, and add legend
+    if (!is.null(proteins_of_special_interest) & any(bool_proteins_of_special_interest_i)){
+      names_proteins_of_special_interest_i <- proteins_of_special_interest[bool_proteins_of_special_interest_i]
+      names_proteins_of_special_interest_i
+      m_norm_imp_proteins_of_special_interest_i <- m_norm_imp_i[names_proteins_of_special_interest_i,,drop=FALSE]
+      for (l in 1:nrow(m_norm_imp_proteins_of_special_interest_i)){
+        m_norm_imp_proteins_of_special_interest_i_l <- m_norm_imp_proteins_of_special_interest_i[l,]
+        lines(x_axis, m_norm_imp_proteins_of_special_interest_i_l, xaxt="n", xlab="", ylim=c(min_center,max_center), lty=5, col=col_all_proteins[rownames(m_norm_imp_proteins_of_special_interest_i)[l]], lwd=0.8)
+      }
+      par(xpd=TRUE)
+      legend("right", legend=rownames(m_norm_imp_proteins_of_special_interest_i), col = col_all_proteins[rownames(m_norm_imp_proteins_of_special_interest_i)], lty=5, lwd=1, bty="n", cex=0.5, inset=-0.18)
+      par(xpd=FALSE)
+    }
+    
+    # plot cluster centers
+    points(x_axis, centers[i,] , xaxt="n", col=colors_kmeans, pch=16, ylab="", xlab="", ylim=c(min_center,max_center), main=paste0("K-Means \n Center of Cluster ",i, " (n=", table_n[i], ")"), cex=1.3)
+    if(any(bool_proteins_of_special_interest_i)){
+      writeLines(paste("This cluster",i," contains the following proteins of special interest:"))
+      print(proteins_of_special_interest[bool_proteins_of_special_interest_i])
+    }
+  }
+}
+  
+@
+
+\vspace{0.5cm} 
+
+
+
+
+ 
+ 
+ 
+ 
+ 
+ 
+\section{Export analysis} 
+
+<<>>=
+
+print(export_matrix)
+print(export_amica)
+
+@
+
+<<echo = FALSE, message = FALSE, warning = FALSE, fig.width =5.5, fig.height =4, fig.align="center">>=
+
+## check if anything is to be exported
+if (export_matrix | export_amica){
+  
+  # extract extra columns that were generated during the course of this script
+  bool_extra_columns <-  ! names(df) %in% names(df_initial)
+  bool_id <- names(df) == "id"
+  bool_extra_columns_with_id <- bool_extra_columns | bool_id
+  df_additional_info_with_id <- df[,bool_extra_columns_with_id]
+  
+  # perform a left join, joining the extra info to the initial dataframe that was read in
+  df_export <- merge(df_initial, df_additional_info_with_id, by = "id", all.x=TRUE)
+  
+  # remove reverse hits in the final matrix export
+  if ("Reverse" %in% names(df_export)){
+    df_export$`Reverse`[is.na(df_export$`Reverse`)] <- ""
+    reverse_bool <- df_export$Reverse=="+"
+    df_export <- df_export[!reverse_bool,]
+  }
+   
+  # remove NAs from the column "Valid Values Filter (removed)", replace with "+"
+  valid_values_filter_column <- df_export$`Valid Values Filter (removed)` 
+  valid_values_filter_column[is.na(valid_values_filter_column)] <- "+"
+  df_export$`Valid Values Filter (removed)` <- valid_values_filter_column
+  
+  # replace columns full of NAs with character vectors containing "" instead.
+  bool_fullNA <- sapply(df_export, FUN= function(column){
+    all(is.na(column))
+  })
+  df_export[,bool_fullNA] <- ""
+
+  # extract various colnames 
+  df_export_colnames <- colnames(df_export)
+  Intensity_colnames <- grep(df_export_colnames, pattern="^Intensity",value=TRUE)
+  iBAQ_colnames      <- df_export_colnames[grepl(df_export_colnames, pattern="iBAQ.|^iBAQ$") & !grepl(df_export_colnames, pattern="iBAQ peptides")]
+  LFQ_colnames       <- grep(df_export_colnames, pattern="LFQ intensity",value=TRUE)
+  norm_colnames      <- grep(df_export_colnames, pattern="norm intensity",value=TRUE)
+  norm_imp_colnames  <- grep(df_export_colnames, pattern="norm imp intensity",value=TRUE)
+  msms_colnames      <- grep(df_export_colnames, pattern="MS.MS.count",value=TRUE)
+  
+  # set order of columns in the output matrix:
+  wanted_first_colnames <- c("Protein IDs","Protein names","Gene names","Fasta headers","Number of proteins","Peptides", "Razor + unique peptides", "Unique peptides","Sequence coverage [%]", "Mol. weight [kDa]", "Q-value", "Score","Potential contaminant","Only identified by site","Valid Values Filter (removed)", Intensity_colnames,iBAQ_colnames, LFQ_colnames,norm_colnames, norm_imp_colnames, msms_colnames)
+  rest_colnames <- df_export_colnames[!(df_export_colnames %in% wanted_first_colnames)]
+  
+  # kick some ID columns that could be problematic for Excel, and also kick out non-relevant columns that were added by limma(B_, t_)
+  kick_colnames <- c("Peptide IDs", "Peptide is razor", "Mod. peptide IDs", "MS/MS IDs","Best MS/MS","Evidence IDs", "Reverse")
+  if (!is.null(pairwise_comp)){
+    kick_colnames_limma <- grep(rest_colnames, pattern= "^B_|^t_", value=TRUE)
+    kick_colnames <- c(kick_colnames, kick_colnames_limma)
+  }  
+  rest_colnames <- rest_colnames[!(rest_colnames %in% kick_colnames)]
+    
+  # generate final export matrix
+  df_export <- df_export[,c(wanted_first_colnames,rest_colnames)]
+  
+  # log2-transform all Intensity columns (e.g. Intensity, iBAQ, LFQ) that are not yet log transformed
+  # Intensity:
+  Intensity_colnames_bool  <- grepl(colnames(df_export), pattern="^Intensity")
+  df_Intensity <-  df_export[,Intensity_colnames_bool] 
+  df_Intensity[df_Intensity== 0] <- NA
+  df_Intensity <- log(df_Intensity, base=2)
+  head(df_Intensity)
+  df_export[,Intensity_colnames_bool] <- df_Intensity
+  # iBAQ:
+  iBAQ_colnames_bool <- grepl(colnames(df_export), pattern="iBAQ.|^iBAQ$") & !grepl(colnames(df_export), pattern="iBAQ peptides")
+  df_iBAQ <-  df_export[,iBAQ_colnames_bool] 
+  df_iBAQ[df_iBAQ == 0] <- NA
+  df_iBAQ <- log(df_iBAQ, base=2)
+  head(df_iBAQ)
+  df_export[,iBAQ_colnames_bool] <- df_iBAQ
+  # LFQ:
+  LFQ_intensity_colnames_bool <- grepl(colnames(df_export), pattern="LFQ intensity")
+  df_LFQ_intensity <-  df_export[,LFQ_intensity_colnames_bool] 
+  df_LFQ_intensity[df_LFQ_intensity == 0] <- NA
+  df_LFQ_intensity <- log(df_LFQ_intensity, base=2)
+  head(df_LFQ_intensity)
+  df_export[,LFQ_intensity_colnames_bool] <- df_LFQ_intensity
+  
+  # for all CON-entries, add ,"Protein names" and "Gene names" and FASTA-header by extracting it from con_table.txt
+  if ("con_table.txt" %in% list.files()){
+    con_table <- read.delim(file="con_table.txt", header=TRUE, stringsAsFactors = FALSE)
+    for (i in 1:nrow(df_export)){
+      
+      if (df_export[i, "Potential contaminant"] == "+" & df_export$`Fasta headers`[i] ==""){
+        accession_con <- strsplit(df_export$`Protein IDs`[i], split="[|]")[[1]][2]
+        
+        if (accession_con %in% con_table$accession){
+          
+          fasta_con <- con_table$header[con_table$accession %in% accession_con][1]
+          df_export[i, "Fasta headers"] <- fasta_con
+          protein_names_con <- substring(fasta_con,first= regexpr(fasta_con,pattern=" ") + 1, last=regexpr(fasta_con,pattern="OS=") -2)
+          df_export[i, "Protein names"] <- protein_names_con
+          gene_names_con <- substring(fasta_con ,first= regexpr(fasta_con ,pattern="GN=") + 3, last=nchar(fasta_con))
+          gene_names_con <- substring(gene_names_con, first=1, last=regexpr(gene_names_con, pattern=" ")-1)
+          df_export[i, "Gene names"] <- gene_names_con
+        }
+      }
+    }
+  }  
+  
+  # export matrix if export_matrix = TRUE
+  if (export_matrix){
+    write.table(df_export, file = paste0("Matrix_Export_",filename), sep = "\t", col.names = TRUE, row.names=FALSE, quote=FALSE)
+    # print info about export matrix:
+    writeLines("Generated output txt-file file called:")
+    writeLines(paste0("Matrix_Export_",filename))
+    writeLines(paste0("(",dim(df_export)[1], " rows, ", dim(df_export)[2], " columns)" ))
+  }  
+  
+  # modified modified/renamed matrix and experimental design if export_amica = TRUE 
+  if (export_amica){
+    
+    # create general MaxQUant-output dataframes needed for first amica input (feature data)
+    df_Intensity_amica <- df_export[,grep(names(df_export), pattern="^Intensity ",value=TRUE)]
+    names(df_Intensity_amica) <- sub(names(df_Intensity_amica), pattern="Intensity ", replacement="RawIntensity_")
+    df_LFQintensity_amica <- df_export[,grep(names(df_export), pattern="LFQ intensity",value=TRUE)]
+    names(df_LFQintensity_amica) <- sub(names(df_LFQintensity_amica), pattern="LFQ intensity ", replacement="LFQIntensity_")
+    df_ImputedIntensity_amica   <- df_export[,grep(names(df_export), pattern="norm imp",value=TRUE)]
+    names(df_ImputedIntensity_amica) <-  sub(names(df_ImputedIntensity_amica), pattern="norm imp ", replacement="ImputedIntensity_")
+    df_iBAQ_amica <- df_export[,grepl(names(df_export), pattern="iBAQ") & !grepl(names(df_export), pattern="iBAQ peptides")]
+    df_razorUniqueCount_amica <- df_export[,grep(names(df_export), pattern="Razor [+] unique peptides",value=TRUE)]
+    names(df_razorUniqueCount_amica) <- sub(names(df_razorUniqueCount_amica), pattern="Razor [+] unique peptides", replacement="razorUniqueCount")
+    df_spectraCount_amica <- df_export[,grep(names(df_export), pattern="MS/MS count",value=TRUE)]
+    names(df_spectraCount_amica) <- sub(names(df_spectraCount_amica), pattern="MS/MS count", replacement="spectraCount")
+    df_group_comparisons_amica <- df_export[,grep(names(df_export), pattern="P.Value|adj.P.Val|logFC|AveExpr",value=TRUE)]
+    feature_data_amica <- data.frame(
+      Majority.protein.IDs = df_export$`Majority protein IDs`,
+      Gene.names = df_export$`Gene names`,
+      Potential.contaminant = df_export$`Potential contaminant`,
+      quantified = ifelse(df_export$`Valid Values Filter (removed)`=="", yes="+", no=""),
+      df_Intensity_amica,
+      df_LFQintensity_amica,
+      df_ImputedIntensity_amica,
+      df_iBAQ_amica,
+      df_razorUniqueCount_amica,
+      df_spectraCount_amica,
+      df_group_comparisons_amica)
+      
+    # create experimental design dataframe as second  amica input
+    experimental_design_amica <- data.frame(samples=samplenames, groups=groups)
+      
+    # save both files as txt-files in new folder called "amica_input"
+    if (!"amica_input" %in% list.files()){
+      dir.create("amica_input")
+    }
+    wd <- getwd()
+    write.table(feature_data_amica, file = paste0(wd, "/amica_input/amicaproteinGroups.txt"), sep = "\t", col.names = TRUE, row.names=FALSE, quote=FALSE)
+    write.table(experimental_design_amica, file = paste0(wd, "/amica_input/design.txt"), sep = "\t", col.names = TRUE, row.names=FALSE, quote=FALSE)
+    cat("\n")
+    writeLines("Generated two files for upload in amica:")
+    writeLines(list.files(path=paste0(wd, "/amica_input")))
+  }
+}
+
+@
+
+\end{document}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
