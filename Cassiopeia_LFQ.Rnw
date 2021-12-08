@@ -1765,7 +1765,7 @@ if (!is.null(pairwise_comp)){
       writeLines("for observations that originate from the same batch.")  
       dupcor <- duplicateCorrelation(relevant_df_imp,design,block=batch_variable)
       fit <- lmFit(relevant_df_imp, design, block= batch_variable, correlation = dupcor$consensus)
-      fit_ebayes <- eBayes(fit)
+      fit_ebayes <- eBayes(fit, trend = trend_limma)
       LIMMAresults <- topTable(fit_ebayes, number=Inf, coef= group2, adjust="BH", sort.by="none")     
     }
     cat("\n")
