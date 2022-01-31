@@ -2423,6 +2423,13 @@ if (export_matrix | export_amica){
 
 @
 
+\section{Used packages} 
+
+<<>>=
+# showing the packages used in this report.
+sessionInfo()
+@
+
 \end{document}
 
 

@@ -7,4 +7,4 @@ Cassiopeia LFQ is an R script that uses knitr/LaTeX to automatically execute and
 
 ## Acknowledgements
 - Markus Hartl 
-- Chen Weiqiang 
+- Weiqiang Chen 
