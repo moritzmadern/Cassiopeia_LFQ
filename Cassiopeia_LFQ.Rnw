@@ -1722,8 +1722,8 @@ if (!is.null(pairwise_comp)){
     cat("\n")
     
     # if there are only two samples to be compared, skip limma and instead only do MA plot
-    if (ncol(relevant_df_imp) == 2){
-      writeLines("There is only one sample per group, hence limma is not possible.")
+    if (ncol(relevant_df_imp) < 6){
+      writeLines("There is less than 3 samples per group, hence limma is not possible.")
       writeLines("MA plot comparing two samples")
       df_plot_l <- data.frame(`Nice names`= df$`Nice names`, logFC = c(relevant_df_imp[,2] - relevant_df_imp[,1]), AveExpr = rowMeans(relevant_df_imp), check.names=FALSE)
       x_extreme <- max(abs(df_plot_l$logFC))
