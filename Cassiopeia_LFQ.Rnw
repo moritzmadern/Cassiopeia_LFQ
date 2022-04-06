@@ -1758,7 +1758,7 @@ if (!is.null(pairwise_comp)){
     
     # calculate Limma (LIMMAresults), including batch effects into the model as random effects if specified
     if (is.null(batch)){
-      fit <- lmFit(relevant_df_imp, design)
+      fit <- lmFit(as.matrix(relevant_df_imp), design)
       fit_ebayes <- eBayes(fit, trend = trend_limma)
       LIMMAresults <- topTable(fit_ebayes, number=Inf, coef = group2, adjust="BH", sort.by="none")
     } else{
@@ -1766,7 +1766,7 @@ if (!is.null(pairwise_comp)){
       writeLines("This allows for modelling of non-zero covariances")
       writeLines("for observations that originate from the same batch.")  
       dupcor <- duplicateCorrelation(relevant_df_imp,design,block=batch_variable)
-      fit <- lmFit(relevant_df_imp, design, block= batch_variable, correlation = dupcor$consensus)
+      fit <- lmFit(as.matrix(relevant_df_imp), design, block= batch_variable, correlation = dupcor$consensus)
       fit_ebayes <- eBayes(fit, trend = trend_limma)
       LIMMAresults <- topTable(fit_ebayes, number=Inf, coef= group2, adjust="BH", sort.by="none")     
     }
