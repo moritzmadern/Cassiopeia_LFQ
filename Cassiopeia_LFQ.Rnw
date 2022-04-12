@@ -10,13 +10,6 @@
 \tableofcontents
 \newpage
 
-<< import default parameters, echo = FALSE, message = FALSE, warning = FALSE>>=
-
-source("Cassiopeia_LFQ_default_parameters.R")
-
-@
-
-
 << set your analysis parameters , echo = FALSE, message = FALSE, warning = FALSE>>=
 
 filename <- "vignette_proteinGroups.txt" 
@@ -48,6 +41,15 @@ number_of_clusters <- 5
 export_clusters <- TRUE
 infer_optimal_number_of_clusters <- TRUE
 reorder_samples_for_k_means_clustering <- FALSE
+
+# less relevant parameters:
+colors <- NULL
+seed <- 123
+list_number <- 10
+plot_number <- 10
+closer_look_sample_number <- "all"
+trend_limma <- TRUE
+heatmap_palette <- colorRampPalette(pals::parula(40))
 
 @
 
