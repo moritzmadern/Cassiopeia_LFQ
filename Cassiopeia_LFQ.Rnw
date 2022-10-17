@@ -1642,14 +1642,42 @@ if(is.null(batch)){
  
 \vspace{0.5cm} 
  
- 
- 
- 
+\subsection{PCA after Imputation and Bacth correction}
 
+\vspace{0.5cm}
+
+<<pca_after_imputation and bacth correction, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5, fig.height =3, fig.align="center">>=
+if(is.null(batch)) {
+  print("No batch correction and no additional PCA plot")
+} else {
+  df_imp_BC <- removeBatchEffect(df_imp, batch)
+  ## calculate PCA
+  pca_res <- prcomp(t(df_imp_BC))
+  rot_mat <- pca_res$rotation
+  res_final <- as.matrix(scale(t(df_imp_BC), center=TRUE, scale=FALSE)) %*% rot_mat
+  eigenvectors <- pca_res$sdev^2
+  fraction_var_pca1 <- round(eigenvectors[1]/sum(eigenvectors),digits=3)
+  fraction_var_pca2 <- round(eigenvectors[2]/sum(eigenvectors),digits=3)
+  ## plot PCA
+  par(xpd=TRUE)
+  par(mfrow=c(1,1))
+  par(mar=c(3,3,2,7.5))
+  par(mgp=c(2,0.7,0))
+  plot(res_final[,"PC1"], res_final[,"PC2"], col=colors, cex=0.9, lwd=2, 
+       pch=as.numeric(factor_batch), yaxt="n", xaxt="n", ylab="", xlab="")
+  axis(side=2, cex.axis = 0.7)
+  axis(side=1, cex.axis = 0.7)
+  title(xlab=paste0("PC1  ","(",fraction_var_pca1*100,"%",")"), 
+        ylab=paste0("PC2  ","(",fraction_var_pca2*100,"%",")"), cex.lab=0.8)
+  if(is.null(batch)){
+    legend("right", legend=unique(groups), col=unique(colors), bty="n", inset=-0.45, cex=0.7, pch=1)
+  } else{
+    legend("right", legend=samplenames, col=colors, bty="n", inset=-0.45, pch=as.numeric(factor_batch), cex=0.6, lwd=1.5)
+  }
+}
+@
  
- 
- 
- 
+\vspace{0.5cm}   
  
 \section{Statistical Pairwise Comparison of Groups} 
 
