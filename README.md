@@ -8,3 +8,12 @@ Cassiopeia LFQ is an R script that uses knitr/LaTeX to automatically execute and
 ## Acknowledgements
 - Markus Hartl 
 - Weiqiang Chen 
+
+## Change Log
+
+### 4.6.6 2023-03-10
+1) Cassiopeia_LFQ is changed to read contaminant.fasta instead of previous con_table.txt. 
+2) con_table.txt is removed. A contaminant.fasta is included. User could use their own contamiant database, just name it to contamiannt.fasta
+
+### 4.6.5 2022-10-19
+1) if batch is not NULL, a PCA plot after imputation and bactch correction is draw to show the success of batch correction.

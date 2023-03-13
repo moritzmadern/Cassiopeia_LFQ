@@ -63,6 +63,9 @@ library(fpc)
 library(RColorBrewer)
 library(dendextend)
 library(pals)
+library(readr)
+library(dplyr)
+library(stringr)
 
 @
 
@@ -2378,8 +2381,14 @@ if (export_matrix | export_amica){
   df_export[,LFQ_intensity_colnames_bool] <- df_LFQ_intensity
   
   # for all CON-entries, add ,"Protein names" and "Gene names" and FASTA-header by extracting it from con_table.txt
-  if ("con_table.txt" %in% list.files()){
-    con_table <- read.delim(file="con_table.txt", header=TRUE, stringsAsFactors = FALSE)
+  if ("contaminants.fasta" %in% list.files()){
+### import contaminant table from fasta and save as con_table
+  con_table <- read_lines("contaminants.fasta", skip_empty_rows = TRUE) %>% 
+    tibble(header = .)  %>% 
+    filter(str_detect(header, ">")) %>%
+    mutate(accession = str_match(header, pattern = ".*\\|(.*)\\|")[,2]) %>%
+    select(2,1)
+  
     for (i in 1:nrow(df_export)){
       
       if (df_export[i, "Potential contaminant"] == "+" & df_export$`Fasta headers`[i] ==""){
