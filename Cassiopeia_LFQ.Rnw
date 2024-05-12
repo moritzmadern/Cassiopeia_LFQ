@@ -1,61 +1,65 @@
 \documentclass[a4paper, 12pt]{article}
 \usepackage[a4paper,left=1.5cm,right=1.5cm,top=1cm,bottom=2cm]{geometry}
+\usepackage{float}
 
 \begin{document}
 
 \title{LFQ data analysis}
 \date{\today}
 \maketitle
-\vspace{1.5cm}
 \tableofcontents
 \newpage
 
 << set your analysis parameters , echo = FALSE, message = FALSE, warning = FALSE>>=
 
-filename <- "vignette_proteinGroups.txt" 
-groups <- rep(c("ctrl+N","ctrl-N", "PD1+N","PD1-N"),each=3)
-export_matrix <- TRUE
-export_amica <- TRUE
+# main parameters
+filename = "vignette_proteinGroups.txt" 
+groups = rep(c("ctrl+N","ctrl-N", "PD1+N","PD1-N"),each=3)
+export_matrix = TRUE
+export_amica = TRUE
 
-remove_contaminants <- TRUE
-razor_plus_unique_peptides_filter <- TRUE
-min_number_razor_plus_unique_peptides <- 2
-mode_valid_values_filter <- "in_at_least_one_group"
-number_valid_values_filter <- 3
+remove_contaminants = TRUE
+razor_plus_unique_peptides_filter = TRUE
+min_number_razor_plus_unique_peptides = 2
+mode_valid_values_filter = "in_at_least_one_group"
+number_valid_values_filter = 3
 
-renormalization_median <- FALSE
-renormalization_quantile <- FALSE
-renormalization_loess <- TRUE
-renormalization_to_proteins <- NULL
-renormalization_to_sample <- NULL
+renormalization_median = FALSE
+renormalization_quantile = FALSE
+renormalization_loess = TRUE
+renormalization_to_proteins = NULL
+renormalization_to_sample = NULL
 
-mode_imputation <- "normal"
-downshift <- 1.8
-width <- 0.3
+mode_imputation = "normal"
+downshift = 1.8
+width = 0.3
 
-pairwise_comp <- list(c("ctrl-N","PD1-N"),c("ctrl+N","PD1+N"),c("PD1-N","PD1+N"))
-batch <- NULL
-proteins_of_special_interest <- c("RTCB","DDX1","C14orf166","FAM98B","PYROXD1","FAM96B")
+pairwise_comp = list(c("ctrl-N","PD1-N"),c("ctrl+N","PD1+N"),c("PD1-N","PD1+N"))
+batch = NULL
+proteins_of_special_interest = c("RTCB","DDX1","C14orf166","FAM98B","PYROXD1","FAM96B")
+perform_gsea = TRUE
+organism = "hsapiens"
 
-number_of_clusters <- 5
-export_clusters <- TRUE
-infer_optimal_number_of_clusters <- TRUE
-reorder_samples_for_k_means_clustering <- FALSE
+number_of_clusters = 5
+export_clusters = TRUE
+infer_optimal_number_of_clusters = TRUE
+reorder_samples_for_k_means_clustering = FALSE
+
 
 # less relevant parameters:
-colors <- NULL
-seed <- 123
-list_number <- 10
-plot_number <- 10
-closer_look_sample_number <- "all"
-trend_limma <- TRUE
-heatmap_palette <- colorRampPalette(pals::parula(40))
+colors = NULL
+seed = 123
+list_number = 10
+plot_number = 10
+closer_look_sample_number = "all"
+trend_limma = TRUE
 
 @
 
 
 << load required packages, echo = FALSE, message = FALSE, warning = FALSE>>=
 
+## read in packages
 library(ggfortify)
 library(limma)
 library(ggplot2)
@@ -66,6 +70,11 @@ library(pals)
 library(readr)
 library(dplyr)
 library(stringr)
+library(gplots)
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+
 
 @
 
@@ -104,6 +113,8 @@ print(mode_imputation)
 print(downshift)
 print(width)
 print(pairwise_comp)
+print(perform_gsea)
+print(organism)
 print(trend_limma)
 print(batch)
 print(proteins_of_special_interest)
@@ -149,6 +160,87 @@ f_CONs <- colorRampPalette(c("white","#404040"))
 f_proteins <- colorRampPalette(c("darkslateblue","blue","red","darkorchid","aquamarine","lightgreen","navy","turquoise","forestgreen","skyblue","plum","dodgerblue2","darkseagreen2", "cadetblue4", "chocolate", "bisque", "gold", "deeppink", "dodgerblue4", "indianred4", "indianred1", "lightsalmon1", "midnightblue", "mediumblue", "orange1", "mediumpurple3", "red3", "rosybrown2", "turquoise2", "wheat2", "slateblue2", "royalblue2", "purple2", "deeppink4", "firebrick", "coral", "tomato2", "#ff073a", "#06ffcb", "#00725a", "#610043", "#0024c3","#c30024", "#e94b3c", "#e94b3c", "#9becf3", "#9af3cd", "#cc9af2", "#d9a583", "#F0C013"))
 
 
+## write heatmap function
+heatmap_plot <- function(m, groups, legend_colors, sample_names, type="normal", dendrogram="column", labrow="", bool_rowv=TRUE, bool_colv = TRUE, plot_path=NULL){
+  
+  # create groups
+  names(colors) <- levels(groups)
+  
+  # replaces NAs with 0
+  m[is.na(m)] <- 0
+  colnames(m) <- sample_names
+  
+  # should rows be reordered
+  if (bool_rowv){
+    rowv <- as.dendrogram(hclust(dist(m)))
+  } else {
+    rowv <- FALSE
+  }
+  
+  # should columns be reordered
+  if (is.logical(bool_colv)){
+    if (bool_colv){
+      colv <- as.dendrogram(hclust(dist(t(m))))
+    } else {
+      colv <- FALSE
+    }
+  } else {
+    colv <- bool_colv
+  }
+  
+  # specify colors
+  if(is.null(legend_colors)){
+    sidecolors <- rep("white", times=ncol(m))
+  } else{
+    sidecolors <- legend_colors[groups]
+  }
+  
+  # create color palette
+  colors_heatmap <- rev(brewer.pal(11, "RdBu"))
+  colors_heatmap[6] <- "#fffec8"
+  heatmap_pal <- colorRampPalette(colors_heatmap)
+  rdbu_colors = heatmap_pal(20)[2:19]
+  heatmap_pal <- colorRampPalette(rdbu_colors)
+  
+  # plot heatmap
+  par(mfrow=c(1,1))
+  par(xpd=TRUE)
+  if (type == "normal"){
+  heatmap.2(m,         
+            Rowv = rowv,
+            Colv=colv, 
+            margins=c(8,8), cexCol = 1,labRow=labrow, col=heatmap_pal(50), ColSideColors = sidecolors, symkey = F,
+            cex.lab=1.5, scale="none", trace="none", dendrogram=dendrogram,
+            key.xlab = "log2 Intensity")
+  }
+  if (type == "centered"){
+    
+    min_m <- min(m, na.rm=TRUE)
+    max_m <- max(m, na.rm=TRUE)
+    heatmap.2(m,         
+              Rowv = rowv,
+              Colv=colv,
+              labRow=labrow, margins=c(8,8), cexCol=1, ColSideColors = sidecolors, trace="none",col=heatmap_pal(50),
+              breaks = seq(from=-0.95,to=0.95, length.out=51), 
+              symkey = F,
+              key.xlab = "log2 Intensity\n(centered at 0)",
+              dendrogram=dendrogram)
+  } 
+  if (type == "standardized"){
+    min_m <- min(m, na.rm=TRUE)
+    max_m <- max(m, na.rm=TRUE)
+    heatmap.2(m,         
+              Rowv = rowv,
+              Colv= colv,
+              labRow=labrow, margins=c(8,8), ColSideColors = sidecolors, trace="none",col=heatmap_pal(50), symkey = F,
+              breaks = seq(from=-2,to=2, length.out=51),
+              dendrogram=dendrogram)
+  }
+  # add legend
+  par(xpd=TRUE)
+}
+
+
 @
 
 << read in data and curate it, echo = FALSE, message = FALSE, warning = FALSE>>=
@@ -175,6 +267,7 @@ if (!"Protein names" %in% names(df) || sum(df$`Protein names` == "") > 0 ){
 
 
 ## add column "Gene names" if missing in proteingroups.txt (extract info from FASTA-header)
+## add column "Gene names" if missing in proteingroups.txt (extract info from FASTA-header)
 if (!"Gene names" %in% names(df) || sum(df$`Gene names` == "") > 0  ){
   gene_names <- character(nrow(df))        #initialize final vector
   fasta_headers <- df$`Fasta headers`
@@ -189,12 +282,11 @@ if (!"Gene names" %in% names(df) || sum(df$`Gene names` == "") > 0  ){
       next()
     }
     fasta_headers_split_i <- fasta_headers_split[[i]]
-    if (length(fasta_headers_split_i) > 0 && grepl(fasta_headers_split_i,pattern="GN=")){
+    if (length(fasta_headers_split_i) > 0 && any(grepl(fasta_headers_split_i,pattern="GN="))){
       gene_names_split_i <- substring(fasta_headers_split_i ,first= regexpr(fasta_headers_split_i,pattern="GN=") + 3, last=nchar(fasta_headers_split_i))
     } else{
       gene_names_split_i <- substring(fasta_headers_split_i ,first = 1, last=nchar(fasta_headers_split_i))
     }
-    gene_names_split_i
     gene_names_split_i <- substring(gene_names_split_i, first=1, last=regexpr(gene_names_split_i, pattern=" |$")-1)
     gene_names_split_i
     if(length(gene_names_split_i)>1){
@@ -245,6 +337,14 @@ if (export_matrix | export_amica){
 
 \vspace{0.5cm}
 \vspace{0.5cm}
+\vspace{0.5cm} 
+
+
+
+
+
+
+
 
 \section{Quality Control and Initial Filtering}
 
@@ -702,6 +802,8 @@ if( any(CON_bool) ){
 
 \vspace{0.5cm}
 \vspace{0.5cm}
+\vspace{0.5cm} 
+
 
 
 
@@ -1262,6 +1364,8 @@ if (!is.null(renormalization_to_proteins)){
 
 \vspace{0.5cm}
 \vspace{0.5cm}
+\vspace{0.5cm} 
+
 
 
 
@@ -1311,18 +1415,25 @@ axis(side=2, cex.axis=0.8, mgp=c(0,0.7,0), las=2, lwd.ticks=0.5)
 
 \vspace{0.5cm}
 
-The following plot is based on log2 normalized intensities of the remaining protein groups (rows). Increasingly brighter colors signify higher intensities. NAs appear as white.
+The following two heatmap plots display the log2-transformed and between-sample normalized intensities of the remaining protein groups (rows). NAs were always set to 0. Dendrograms show hierarchical clustering results of samples based on euclidian distances.
 
 \vspace{0.5cm}
 
-<<heatmap_before_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =9, fig.height =6, fig.align='center',fig.show='hold'>>=
+<<heatmap_before_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =7, fig.height =6, fig.align='center',fig.show='hold'>>=
 
-par(mfrow=c(1,1))
-heatmap(m_NAs,
-        Rowv = as.dendrogram(hclust(dist(m))),
-        Colv=as.dendrogram(hclust(dist(t(m)))),
-        margins=c(9,9), cexCol = 1,scale="none",labRow="",col = heatmap_palette(40), ColSideColors = colors, cex.lab=2, na.rm=TRUE)
-legend("right",cex=1.2,legend=unique_groups, pch=16, col=unique(colors), bty="n", inset=0.03)
+## plot heatmap of log2-transformed intensities
+heatmap_plot(m_NAs, groups=groups, sample_names = samplenames, 
+             legend_colors=setNames(colors, nm=groups),
+             dendrogram = "both", type="normal")
+
+
+
+## plot heatmap of log2-transformed intensites centered at rowmeans = 0
+m_centered <- sweep(m_NAs, FUN= "-", STATS = rowMeans(m_NAs), MARGIN=1)
+heatmap_plot(m=m_centered, groups=groups, sample_names = samplenames, 
+             legend_colors=setNames(colors, nm=groups),
+              dendrogram="both", type="centered")
+
 
 @
 
@@ -1368,6 +1479,8 @@ if(is.null(batch)){
  
 \vspace{0.5cm}
 \vspace{0.5cm}
+\vspace{0.5cm} 
+
 
 
 
@@ -1552,6 +1665,8 @@ for (l in 1:ncol(df_imp)){
 
 \vspace{0.5cm}
 \vspace{0.5cm}
+\vspace{0.5cm} 
+
 
 
 
@@ -1588,21 +1703,25 @@ m <- as.matrix(df_imp)
 
 \subsection{Heatmap after Imputation}
 
+The following two heatmap plots display the log2-transformed and between-sample normalized intensities after imputation of missing values. Dendrograms on top show hierarchical clustering results of samples.
+
 \vspace{0.5cm}
 
-<<heatmap_after_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =9, fig.height =6, fig.align='center',fig.show='hold'>>=
+<<heatmap_after_imputation, echo = FALSE, message = FALSE, warning = FALSE, fig.width =7, fig.height =6, fig.align='center',fig.show='hold'>>=
 
-## make sure a matrix without NAs is used to calculate hclust distances
-m_noNA <- m
-m_noNA[is.na(m_noNA)] <- 0
+## plot heatmap of log2-transformed intensities
+heatmap_plot(m, groups=groups, sample_names = samplenames, 
+             legend_colors=setNames(colors, nm=groups),
+             dendrogram = "both", type="normal")
 
-## plot heatmap
-par(mfrow=c(1,1))
-heatmap(m,
-        Rowv = as.dendrogram(hclust(dist(m_noNA))),
-        Colv=as.dendrogram(hclust(dist(t(m_noNA)))),
-        margins=c(9,9), cexCol = 1,scale="none",labRow="",col = heatmap_palette(40), ColSideColors = colors, cex.lab=2, na.rm=TRUE)
-legend("right",cex=1.2,legend=unique_groups, pch=16, col=unique(colors), bty="n", inset=0.03)
+
+
+## plot heatmap of log2-transformed intensites centered at rowmeans = 0
+m_centered <- sweep(m, FUN= "-", STATS = rowMeans(m), MARGIN=1)
+heatmap_plot(m=m_centered, groups=groups, sample_names = samplenames, 
+             legend_colors=setNames(colors, nm=groups),
+              dendrogram="both", type="centered")
+
 
 @
 
@@ -1645,11 +1764,11 @@ if(is.null(batch)){
  
 \vspace{0.5cm} 
  
-\subsection{PCA after Imputation and Bacth correction}
+\subsection{PCA after Imputation and Batch correction}
 
 \vspace{0.5cm}
 
-<<pca_after_imputation and bacth correction, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5, fig.height =3, fig.align="center">>=
+<<pca_after_imputation and batch correction, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5, fig.height =3, fig.align="center">>=
 if(is.null(batch)) {
   print("No batch correction and no additional PCA plot")
 } else {
@@ -1681,8 +1800,19 @@ if(is.null(batch)) {
 @
  
 \vspace{0.5cm}   
+\vspace{0.5cm} 
+\vspace{0.5cm} 
+
  
-\section{Statistical Pairwise Comparison of Groups} 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+\section{Pairwise Comparison of Groups} 
 
 \vspace{0.5cm} 
 
@@ -1690,7 +1820,11 @@ if(is.null(batch)) {
 
 \vspace{0.5cm} 
 
-\noindent In this section, Cassiopeia does statistical comparisons of groups using the LIMMA (Linear Models for Microarray Data) package from the R Bioconductor repository. Similar to the classical t-test, LIMMA tests for the equality of norm intensity means in two different groups for each protein of proteinGroups.txt (barring those proteins that were removed during filtering). The number of group comparisons in this report are
+\noindent In this section, Cassiopeia does statistical comparisons of groups using the LIMMA (Linear Models for Microarray Data) package from the R Bioconductor repository. Similar to the classical t-test, LIMMA tests for the equality of norm intensity means in two different groups for each protein of proteinGroups.txt (barring those proteins that were removed during filtering). Cassiopeia also allows for subsequent GSEA on the DE-testing results using t-statistics as ranks. Gene sets tested for enrichmend belong to either GO (Gene Ontology), Hallmark or KEGG databases. The top GSEA results are visualized as enrichment map, and auxilliary results are stored in the "GSEA" directory.
+
+\vspace{0.5cm} 
+
+\noindent The number of group comparisons in this report are
 
 <<echo = FALSE, message = FALSE, warning = FALSE>>=
 
@@ -1703,6 +1837,8 @@ writeLines(paste0(length(pairwise_comp), " (out of ", choose(length(unique_group
 <<echo = FALSE, message = FALSE, warning = FALSE>>=
 
 print(pairwise_comp)
+print(perform_gsea)
+print(organism)
 
 @
 
@@ -1710,7 +1846,7 @@ print(pairwise_comp)
 
 \subsection{Results}
 
-<<pairwise_comparison_using_limma, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5.5, fig.height =4, fig.align="center">>=
+<<pairwise_comparison_using_limma, echo = FALSE, message = FALSE, warning = FALSE, fig.width =5.5, fig.height =4, fig.align="center", fig.pos='H'>>=
 
 ## extract normalized imputed intensities
 bool_imp <- grepl(names(df), pattern="norm imp")
@@ -1878,7 +2014,7 @@ if (!is.null(pairwise_comp)){
     axis(side=1, cex.axis=0.7)
     axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
     points(df_plot_l_significant_10$logFC, neg_log_pval_significant_10, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)])
-    legend("right", legend=df_plot_l_significant_10$`Nice names`, col = col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
+    text(df_plot_l_significant_10$logFC, neg_log_pval_significant_10, pos=3, offset=0.2, labels=df_plot_l_significant_10$`Nice names`, cex=0.4)
     writeLines("Relevant statistics for the top significant proteins:")
     print_df_plot_l_significant_10 <-  df_plot_l_significant_10
     print_df_plot_l_significant_10 <- print_df_plot_l_significant_10[order(print_df_plot_l_significant_10$p, decreasing=FALSE),]
@@ -1897,8 +2033,8 @@ if (!is.null(pairwise_comp)){
     axis(side=1, cex.axis=0.7)
     axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
     points(df_plot_l_significant_10$logFC, df_plot_l_significant_10$AveExpr, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)])
-    legend("right", legend=df_plot_l_significant_10$`Nice names`, col = col_all_proteins[as.character(df_plot_l_significant_10$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
-    
+    text(df_plot_l_significant_10$logFC, df_plot_l_significant_10$AveExpr, pos=3, offset=0.2, labels=df_plot_l_significant_10$`Nice names`, cex=0.4)
+ 
     # plot volcano plot, MA plot and profile plot for proteins of special interest (if specified)
     if (!is.null(proteins_of_special_interest) & any(proteins_of_special_interest %in% df$`Nice names`)){
       bool_rows_proteins_of_special_interest <- df_plot_l$`Nice names` %in% proteins_of_special_interest 
@@ -1918,8 +2054,8 @@ if (!is.null(pairwise_comp)){
       axis(side=1, cex.axis=0.7)
       axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
       points(df_plot_l_special_interest$logFC, neg_log_pval[bool_rows_proteins_of_special_interest], pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)])
-      legend("right", legend=df_plot_l_special_interest$`Nice names`, col = col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
-    
+      text(df_plot_l_special_interest$logFC, neg_log_pval[bool_rows_proteins_of_special_interest], pos=3, offset=0.2, labels=df_plot_l_special_interest$`Nice names`, cex=0.4)
+      
       writeLines("Relevant statistics for the proteins of special interest:")
       print_df_plot_l_special_interest <- df_plot_l_special_interest
       print_df_plot_l_special_interest[,"logFC"] <- round(print_df_plot_l_special_interest[,"logFC"], digits=2)
@@ -1971,11 +2107,12 @@ if (!is.null(pairwise_comp)){
       axis(side=1, cex.axis=0.7)
       axis(side=2, cex.axis=0.7, las=2, mgp=c(2.5, 0.8, 0))
       points(df_plot_l_special_interest$logFC, df_plot_l_special_interest$AveExpr, pch=16, cex=0.9, xaxt="n", col=col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)])
-      legend("right", legend=df_plot_l_special_interest$`Nice names`, col = col_all_proteins[as.character(df_plot_l_special_interest$`Nice names`)], pch=16, cex=0.6, bty="n", inset=-10*1/xmax)
-    }
+      text(df_plot_l_special_interest$logFC, df_plot_l_special_interest$AveExpr, pos=3, offset=0.2, labels=df_plot_l_special_interest$`Nice names`, cex=0.4)
+      }
     
     # plot distribution of p-values and adjusted p-values as histogram
-    writeLines("Distribution of p-values and adjusted p-values:")
+    writeLines("Plot p-value histograms:")
+    writeLines("Note: p-values have uniform distribution under H0.")
     ind_pval <- which(grepl(names(LIMMAresults), pattern="^P[.]Val"))
     ind_adjpval <- which(grepl(names(LIMMAresults), pattern="^adj[.]P[.]Val"))
     ymax<- sort(table(cut(LIMMAresults[,ind_pval], breaks=seq(from=0,to=1,length.out = 26))), decreasing = TRUE)[1]
@@ -1992,27 +2129,160 @@ if (!is.null(pairwise_comp)){
     axis(side=2,cex.axis=0.6)
     axis(side=1, at= seq(0,1,by=0.2), cex.axis=0.6)
     title(cex.main=0.7, cex.lab=0.7, ylab="frequency \n (adj. p-values) ")
-    writeLines("Note:")
-    writeLines("For proteins where H0 is true (i.e. no differential expression),")
-    writeLines("p-values should be uniformly distributed.")  
-    writeLines("The first bar to the very left corresponds to p-vales values that are < 0.05.")
-    cat("\n")
-    cat("\n")
-    cat("\n")
+    
+
     
     # give LIMMAresults new colnames based on which groups were compared, then bind it to the dataframe
     new_colnames <- paste0(colnames(LIMMAresults),"_",group2,"__vs__",group1)
     colnames(LIMMAresults) <- new_colnames
     df <- cbind(df, LIMMAresults)
+    
+    
+    # check if GSEA should be performed
+    if (perform_gsea){
+      
+      # create folder for GSEA non-existent
+      if (!"GSEA" %in% list.files()){
+        dir.create("GSEA")
+      }
+      
+      # prepare ranked query list for GSEA
+      df_gsea <- data.frame(Gene.names=df$`Gene names`, rank=LIMMAresults$t)
+      df_gsea$Gene.names_first <- df_gsea$Gene.names %>%  sapply(FUN=function(text){
+                                                          if (text == "") return("")
+                                                          if (!grepl(text, pattern=";")){
+                                                            res <- sub(x=text, pattern=";.*$", replacement="")
+                                                            return(res)
+                                                          } else {
+                                                            res <- strsplit(x=text, split=";") %>% unlist()
+                                                            # find the entries that are not empty, and do not start with "Gm"
+                                                            bool_Gm <- grepl(res, pattern="^Gm")
+                                                            bool_empty <- res == ""
+                                                            res_ideal <- res[!(bool_Gm) & !bool_empty ]
+                                                            if (length(res_ideal) > 1){
+                                                              return(res_ideal[1])
+                                                            } else { return(res[1]) }
+                                                          }
+                                                        })
+      ranked_query_list <- setNames(df_gsea$rank, nm=df_gsea$Gene.names_first)
+      ranked_query_list <- sort(ranked_query_list, decreasing = TRUE)
+      ranked_query_list <- ranked_query_list[!is.na(ranked_query_list)] # remove potential NAs
+      ranked_query_list <- ranked_query_list[!duplicated(names(ranked_query_list))] # remove potential duplicate gene names
+      
+      # specify species parameter for msigdb
+      if (organism == "mmusculus") {species_gsea = "Mus musculus"}
+      if (organism == "hsapiens") {species_gsea = "Homo sapiens"}
+      if (!organism %in% c("mmusculus", "hsapiens")){
+          writeLines("Skipping GSEA because organism not supported.")
+          next()
+      }
+      
+      # retrieve gene lists for which GSEA enrichment testing should be conducted
+      df_msig_hallmark <- msigdbr(species = species_gsea, category = "H") %>%   
+            dplyr::select(gs_name, gene_symbol) %>% as.data.frame()
+      df_msig_go <- msigdbr(species = species_gsea, category = "C5") %>% filter(gs_subcat %in% c("GO:BP", "GO:CC", "GO:MF")) %>%
+            dplyr::select(gs_name, gene_symbol) %>% as.data.frame()
+      df_msig_kegg <- msigdbr(species = species_gsea, category = "C2") %>% filter(gs_subcat %in% c("CP:KEGG")) %>%
+            dplyr::select(gs_name, gene_symbol) %>% as.data.frame()
+      df_geneSets <- rbind(df_msig_hallmark, df_msig_go, df_msig_kegg)
+  
+      # perform GSEA and save results table
+      gsea_res <- GSEA(geneList = ranked_query_list, TERM2GENE = df_geneSets)
+      df_gsea_res <- gsea_res@result
+      filename_table <- paste0("GSEA/GSEA_ResultTable__", group2,"_vs_",group1,".txt")
+      write.table(x=df_gsea_res,filename_table, col.names =TRUE, row.names = FALSE, quote=FALSE, sep="\t")
+
+      # plot dotplot for top upregulated genes
+      df_gsea_res_dysreg <- df_gsea_res %>% filter(NES > 0)
+      if (nrow(df_gsea_res_dysreg) > 0){
+        if (nrow(df_gsea_res_dysreg) >0){
+          df_gsea_res_dysreg$ID_mod <- df_gsea_res_dysreg$ID %>% gsub(., pattern="[_]", replacement=" ")
+          ind_break <- gregexpr(df_gsea_res_dysreg$ID_mod, pattern=" ") %>% sapply(., FUN=function(x){
+            ind_words_halved <- round(length(x)/2)
+            if (ind_words_halved>0){
+              return(as.numeric(x[ind_words_halved]))
+            } else {
+              return(1)
+            }
+          })
+          df_gsea_res_dysreg$ID_mod <- ifelse(!is.na(ind_break) & ind_break>25, yes=paste0(substring(df_gsea_res_dysreg$ID_mod, 0, ind_break), "\n", substring(df_gsea_res_dysreg$ID_mod,ind_break, 100000)), no=df_gsea_res_dysreg$ID_mod)
+          df_gsea_res_dysreg$leading_edge_Percent <- substring(df_gsea_res_dysreg$leading_edge, first=regexpr(df_gsea_res_dysreg$leading_edge, pattern="=") +1, last=regexpr(df_gsea_res_dysreg$leading_edge, pattern="%")-1) %>% as.numeric()
+          df_gsea_res_dysreg <- df_gsea_res_dysreg[order(df_gsea_res_dysreg$leading_edge_Percent, decreasing = TRUE),]
+          df_gsea_res_dysreg$ID_mod <- factor(df_gsea_res_dysreg$ID_mod, levels=rev(df_gsea_res_dysreg$ID_mod))
+          df_gsea_res_dysreg <- df_gsea_res_dysreg[order(df_gsea_res_dysreg$p.adjust),]
+          gg <- ggplot(data=df_gsea_res_dysreg[1:pmin(15, nrow(df_gsea_res_dysreg)),]) +
+                    geom_point(aes(x=leading_edge_Percent, y=ID_mod, col=p.adjust, size=setSize)) +
+                    theme_bw() + scale_color_gradient(low = "#CF6C67", high = "#457AB3", limits=c(0,0.05)) + ylab("Gene set name") + xlab("Leading edge percentage") + ggtitle(paste0("Top Upregulated (NES>0)\n", group2," vs. ",group1))
+          ggsave(plot=gg, filename = paste0("GSEA/Dotplot_TopUpregulated__", group2, "_vs_", group1,".pdf"))
+        }
+  
+        # plot enrichment map for top upregulated genes
+        gsea_res_up <- gsea_res
+        gsea_res_up@result <- gsea_res_up@result[gsea_res_up@result$NES>0,]
+        writeLines(paste0("Number of upregulated gene sets (NES>0) in GSEA: ", nrow(df_gsea_res[df_gsea_res$NES>0,])))
+        if (nrow(gsea_res_up@result>0)){
+          writeLines("Enrichment map of top upregulated gene sets:")
+          term_sim <- pairwise_termsim(gsea_res_up)
+          emaplot_up <- emapplot(term_sim, cex_label_goup=0.9, cex_label_category=0.5, showCategory=20) + ggtitle(paste0("Top Upregulated (NES>0)\n", group2," vs. ",group1))
+          print(emaplot_up)
+        }
+      }
+      
+      # plot dotplot for top downregulated genes
+      df_gsea_res_dysreg <- df_gsea_res %>% filter(NES < 0)
+      if (nrow(df_gsea_res_dysreg) > 0){
+        if (nrow(df_gsea_res_dysreg) >0){
+          df_gsea_res_dysreg$ID_mod <- df_gsea_res_dysreg$ID %>% gsub(., pattern="[_]", replacement=" ")
+          ind_break <- gregexpr(df_gsea_res_dysreg$ID_mod, pattern=" ") %>% sapply(., FUN=function(x){
+            ind_words_halved <- round(length(x)/2)
+            if (ind_words_halved>0){
+              return(as.numeric(x[ind_words_halved]))
+            } else {
+              return(1)
+            }
+          })
+          df_gsea_res_dysreg$ID_mod <- ifelse(!is.na(ind_break) & ind_break>25, yes=paste0(substring(df_gsea_res_dysreg$ID_mod, 0, ind_break), "\n", substring(df_gsea_res_dysreg$ID_mod,ind_break, 100000)), no=df_gsea_res_dysreg$ID_mod)
+          df_gsea_res_dysreg$leading_edge_Percent <- substring(df_gsea_res_dysreg$leading_edge, first=regexpr(df_gsea_res_dysreg$leading_edge, pattern="=") +1, last=regexpr(df_gsea_res_dysreg$leading_edge, pattern="%")-1) %>% as.numeric()
+          df_gsea_res_dysreg <- df_gsea_res_dysreg[order(df_gsea_res_dysreg$leading_edge_Percent, decreasing = TRUE),]
+          df_gsea_res_dysreg$ID_mod <- factor(df_gsea_res_dysreg$ID_mod, levels=rev(df_gsea_res_dysreg$ID_mod))
+          df_gsea_res_dysreg <- df_gsea_res_dysreg[order(df_gsea_res_dysreg$p.adjust),]
+          gg <- ggplot(data=df_gsea_res_dysreg[1:pmin(15, nrow(df_gsea_res_dysreg)),]) +
+                    geom_point(aes(x=leading_edge_Percent, y=ID_mod, col=p.adjust, size=setSize)) +
+                    theme_bw() + scale_color_gradient(low = "#CF6C67", high = "#457AB3", limits=c(0,0.05)) + ylab("Gene set name") + xlab("Leading edge percentage") + ggtitle(paste0("Top Downregulated (NES<0)\n",  group2," vs. ",group1))
+          ggsave(plot=gg, filename = paste0("GSEA/Dotplot_TopDownregulated__", group2, "_vs_", group1, ".pdf"))
+        }
+        
+        # plot enrichment map for top downregulated genes
+        gsea_res_down <- gsea_res
+        gsea_res_down@result <- gsea_res_down@result[gsea_res_down@result$NES<0,]
+        writeLines(paste0("Number of downregulated gene sets (NES<0) in GSEA: ", nrow(df_gsea_res[df_gsea_res$NES<0,])))
+        if (nrow(gsea_res_down@result>0)){
+          writeLines("Enrichment map of top downregulated gene sets:")
+          term_sim <- pairwise_termsim(gsea_res_down)
+          emaplot_down <- emapplot(term_sim, cex_label_goup=0.9, cex_label_category=0.5, showCategory=20) + ggtitle(paste0("Top Downregulated (NES<0)\n",  group2," vs. ", group1))
+          print(emaplot_down)
+
+        }
+      }
+    }
+    if (l < length(pairwise_comp)){
+          writeLines(paste0("Moving on to the next pairwise group comparison..."))
+          plot.new() # otherwise the last emap for l<length(pairwise_comp) is not plotted when compiling to pdf for some reason
+    } 
   }
 }
 
 @
 
-\noindent Note that protein identities were displayed/listed via "Nice names", which correspond to proteins' gene names (column: "Gene names") reduced to just the first entry if multiple entries are separated by ";".
+\vspace{0.5cm} 
+\noindent Note: Proteins in above volcano and MA plots were annotated via "Nice names", which correspond to gene name entries (column: "Gene names") reduced to just the first entry if multiple entries are separated by ";". \newline \newline
+\noindent Note: The GSEA uses limma t-statistics as ranks, and gene names as identifiers.If multiple gene names are present, the first entry is used. "Upgregulated" in GSEA means that genes have predominantly positive log2 fold changes, thus NES \textgreater 0. "Downregulated" on the other hand means that genes have predominantly negative log2 fold changes, thus NES \textless 0. \newline
+\noindent Please note that additional GSEA results (e.g. result tables) are stored in the directory "GSEA".
+  
+\vspace{0.5cm} 
+\vspace{0.5cm}
+\vspace{0.5cm} 
 
-\vspace{0.5cm} 
-\vspace{0.5cm} 
 
 
 
@@ -2282,6 +2552,9 @@ if (!is.null(number_of_clusters)){
 @
 
 \vspace{0.5cm} 
+\vspace{0.5cm} 
+\vspace{0.5cm} 
+
 
 
 
@@ -2464,10 +2737,24 @@ if (export_matrix | export_amica){
 
 @
 
+
+\vspace{0.5cm} 
+\vspace{0.5cm} 
+\vspace{0.5cm} 
+
+
+
+
+
+
+
+
+
+
+
 \section{Used packages} 
 
 <<>>=
-# showing the packages used in this report.
 sessionInfo()
 @
 

@@ -1,30 +1,1 @@
-filename <- "vignette_proteinGroups.txt" 
-groups <- rep(c("ctrl+N","ctrl-N", "PD1+N","PD1-N"),each=3)
-export_matrix <- TRUE
-export_amica <- TRUE
-
-remove_contaminants <- TRUE
-razor_plus_unique_peptides_filter <- TRUE
-min_number_razor_plus_unique_peptides <- 2
-mode_valid_values_filter <- "in_at_least_one_group"
-number_valid_values_filter <- 3
-
-renormalization_median <- FALSE
-renormalization_quantile <- FALSE
-renormalization_loess <- TRUE
-renormalization_to_proteins <- NULL
-renormalization_to_sample <- NULL
-
-mode_imputation <- "normal"
-downshift <- 1.8
-width <- 0.3
-
-pairwise_comp <- list(c("ctrl-N","PD1-N"),c("ctrl+N","PD1+N"),c("PD1-N","PD1+N"))
-batch <- NULL
-proteins_of_special_interest <- c("RTCB","DDX1","C14orf166","FAM98B","PYROXD1")
-
-number_of_clusters <- 5
-export_clusters <- TRUE
-infer_optimal_number_of_clusters <- TRUE
-reorder_samples_for_k_means_clustering <- FALSE
-
+filename = "vignette_proteinGroups.txt" groups = rep(c("ctrl+N","ctrl-N", "PD1+N","PD1-N"),each=3)export_matrix = TRUEexport_amica = TRUEremove_contaminants = TRUErazor_plus_unique_peptides_filter = TRUEmin_number_razor_plus_unique_peptides = 2mode_valid_values_filter = "in_at_least_one_group"number_valid_values_filter = 3renormalization_median = FALSErenormalization_quantile = FALSErenormalization_loess = TRUErenormalization_to_proteins = NULLrenormalization_to_sample = NULLmode_imputation = "normal"downshift = 1.8width = 0.3pairwise_comp = list(c("ctrl-N","PD1-N"),c("ctrl+N","PD1+N"),c("PD1-N","PD1+N"))batch = NULLproteins_of_special_interest = c("RTCB","DDX1","C14orf166","FAM98B","PYROXD1","FAM96B")perform_gsea = TRUEorganism = "hsapiens"number_of_clusters = 5export_clusters = TRUEinfer_optimal_number_of_clusters = TRUEreorder_samples_for_k_means_clustering = FALSE# less relevant parameters:colors = NULLseed = 123list_number = 10plot_number = 10closer_look_sample_number = "all"trend_limma = TRUE
