@@ -18,11 +18,11 @@ Cassiopeia LFQ is an R script that uses knitr/LaTeX to automatically execute and
 ### 4.6.7 2024-05-11 (by Moritz Madern)
 1) Changed colors in heatmaps to a gradient of blue-yellow-red. Added additional heatmaps that show log2-transformed and centered intensities (i.e., row-mean=0)
 2) Highlighting of proteins in volcano and MA plots is now achieved via text. Figure legends were consequently removed.
-3) Added optional GSEA analysis for mouse and human using the limma DE-testing results as input. GSEA result tables will be stored in "GSEA folder" alongside "dotplots"". Due to space constraints, the pdf Report only shows enrichment maps.
+3) Added optional GSEA analysis for mouse and human using the limma DE-testing results as input. GSEA result tables will be stored in "GSEA folder" alongside "dotplots"". Due to space constraints, the pdf report only shows enrichment maps.
 
 ### 4.6.6 2023-03-10 (by Weiqiang Chen)
-1) Cassiopeia_LFQ was changed to read contaminant.fasta instead of previous con_table.txt. 
-2) con_table.txt was removed. A contaminant.fasta was included. User can now use their own contaminant database named "contaminants.fasta"
+1) Cassiopeia_LFQ was changed to read "contaminants.fasta" instead of previous con_table.txt. 
+2) con_table.txt was removed. A contaminants.fasta was included. User can now use their own contaminant database named "contaminants.fasta"
 
 ### 4.6.5 2022-10-19 (by Weiqiang Chen)
 1) If batch is not NULL, a PCA plot after imputation and batch correction is now plotted to illustrate the effect of batch correction.

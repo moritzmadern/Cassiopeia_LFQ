@@ -2655,7 +2655,8 @@ if (export_matrix | export_amica){
   
   # for all CON-entries, add ,"Protein names" and "Gene names" and FASTA-header by extracting it from con_table.txt
   if ("contaminants.fasta" %in% list.files()){
-### import contaminant table from fasta and save as con_table
+    
+  # import contaminant table from fasta and save as con_table
   con_table <- read_lines("contaminants.fasta", skip_empty_rows = TRUE) %>% 
     tibble(header = .)  %>% 
     filter(str_detect(header, ">")) %>%
