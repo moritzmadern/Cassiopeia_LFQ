@@ -2275,8 +2275,8 @@ if (!is.null(pairwise_comp)){
 @
 
 \vspace{0.5cm} 
-\noindent Note: Proteins in above volcano and MA plots were annotated via "Nice names", which correspond to gene name entries (column: "Gene names") reduced to just the first entry if multiple entries are separated by ";". \newline \newline
-\noindent Note: The GSEA uses limma t-statistics as ranks, and gene names as identifiers.If multiple gene names are present, the first entry is used. "Upgregulated" in GSEA means that genes have predominantly positive log2 fold changes, thus NES \textgreater 0. "Downregulated" on the other hand means that genes have predominantly negative log2 fold changes, thus NES \textless 0. \newline
+\noindent Note: Proteins in above volcano and MA plots are annotated via "Nice names", which correspond to gene name entries (column: "Gene names") reduced to just the first entry in case of multiple entries separated by ";". \newline \newline
+\noindent Note: The GSEA uses the limma t-statistics as ranks, and gene names as identifiers. If multiple gene names are present, the first entry is used. "Upgregulated" in GSEA means that genes from the repective gene set have predominantly positive log2 fold changes, thus NES \textgreater 0. "Downregulated" on the other hand means that genes have predominantly negative log2 fold changes, thus NES \textless 0. \newline
 \noindent Please note that additional GSEA results (e.g. result tables) are stored in the directory "GSEA".
   
 \vspace{0.5cm} 
