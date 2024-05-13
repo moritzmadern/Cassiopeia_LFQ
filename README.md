@@ -3,7 +3,7 @@
 ## General Information
 Cassiopeia LFQ is an R script that uses knitr/LaTeX to automatically execute and report standard data analysis steps for label-free proteomics data, such as quality control, filtering and normalization, differential expression testing (using limma-trend), GSEA (for human and mouse proteomes), and other insightful & exploratory output (PCA, k-means clustering, etc.):
 ![Screenshot](img/DemoFigures.png)
-Cassiopeia LFQ developed to automatize the standard label-free quantification (LFQ) data analysis workflow in the Max Perutz Labs Mass Spectrometry Facility. The script’s input is a “proteinGroups.txt” file as produced by database searching using the proteomic software platform MaxQuant, as well as manually specified parameters that dictate what Cassiopeia is doing. To get an overview of all features, check out the "example.pdf" which showcases a standard Cassiopeia analysis output. For more information and instructions on how to use it, please refer to the user guide.
+Cassiopeia LFQ was developed to automatize the standard label-free quantification (LFQ) data analysis workflow at the Max Perutz Labs Mass Spectrometry Facility (Vienna). The script’s input is a “proteinGroups.txt” file as produced by database searching using the proteomic software platform MaxQuant, as well as manually specified parameters that dictate what Cassiopeia is doing. To get an overview of all features, check out the "example.pdf" which showcases a standard Cassiopeia analysis output. For more information and instructions on how to use it, please refer to the user guide in this repository.
 
 
 
@@ -16,9 +16,9 @@ Cassiopeia LFQ developed to automatize the standard label-free quantification (L
 ## Change Log
 
 ### 4.6.7 2024-05-11 (by Moritz Madern)
-1) Changed colors in heatmaps to a gradient of blue-yellow-red. Added additional heatmaps that show log2-transformed and centered intensities (i.e., row-mean=0)
+1) Changed colors in heatmaps to a gradient ranging from blue-yellow-red. Added additional heatmaps that show log2-transformed and centered intensities (i.e., row-mean=0)
 2) Highlighting of proteins in volcano and MA plots is now achieved via text. Figure legends were consequently removed.
-3) Added optional GSEA analysis for mouse and human using the limma DE-testing results as input. GSEA result tables will be stored in "GSEA folder" alongside "dotplots"". Due to space constraints, the pdf report only shows enrichment maps.
+3) Added optional GSEA analysis for mouse and human on the basis of the limma DE-testing results. GSEA result tables will be stored in "GSEA folder" alongside "dotplots"". Due to space constraints, the pdf report only shows enrichment maps.
 
 ### 4.6.6 2023-03-10 (by Weiqiang Chen)
 1) Cassiopeia_LFQ was changed to read "contaminants.fasta" instead of previous con_table.txt. 
